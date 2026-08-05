@@ -1,6 +1,14 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Dialog, Button, Input, Select, SensitiveInput, Collapsible, useKumoToastManager } from '@cloudflare/kumo'
-import { AiChatAuthorInfo, AiModelConfig, AiModelProvider, AiGatewayInfo, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
+import {
+  AiChatAuthorInfo,
+  AiModelConfig,
+  AiModelProvider,
+  AiGatewayInfo,
+  AiOAuthProvider,
+  AiReasoningEffort,
+  SUGGESTED_MODELS,
+} from '@gadgets/workshop-shared/api'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 
@@ -21,6 +29,7 @@ const PROVIDER_LABELS: Record<AiModelProvider, string> = {
   openai: 'OpenAI',
   google: 'Google',
   cloudflare: 'Cloudflare Workers AI',
+  xai: 'xAI (Grok / SuperGrok)',
   ollama: 'Ollama',
 }
 
@@ -30,8 +39,17 @@ const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   openai: 'sk-...',
   google: 'AIza...',
   cloudflare: 'Cloudflare API token',
+  xai: 'xai-...',
   ollama: '(optional)',
 }
+
+const OAUTH_PROVIDERS = new Set<AiModelProvider>(['xai'])
+
+const EFFORT_OPTIONS: { value: AiReasoningEffort; label: string }[] = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+]
 
 // Example used in the custom-model placeholders for providers that have no suggested models
 // (currently Ollama, which serves whatever the user has pulled locally).
@@ -41,6 +59,19 @@ const FALLBACK_EXAMPLE_MODEL = { modelId: 'gemma4:31b', name: 'Gemma 4 31B' }
 function exampleModel(provider: AiModelProvider): { modelId: string, name: string } {
   const first = Object.entries(SUGGESTED_MODELS[provider])[0]
   return first ? { modelId: first[0], name: first[1].name } : FALLBACK_EXAMPLE_MODEL
+}
+
+function isOAuthProvider(provider: AiModelProvider): provider is AiOAuthProvider {
+  return OAUTH_PROVIDERS.has(provider)
+}
+
+function suggestedPrefersOAuth(provider: AiModelProvider, modelId: string): boolean {
+  return !!SUGGESTED_MODELS[provider]?.[modelId]?.oauthPreferred
+}
+
+function defaultEffort(provider: AiModelProvider, modelId: string | undefined): AiReasoningEffort | undefined {
+  if (!modelId) return undefined
+  return SUGGESTED_MODELS[provider]?.[modelId]?.reasoningEffort
 }
 
 // Encode a selection into a string value for the Select component.
@@ -66,10 +97,14 @@ function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null
   const providerOrder = Object.keys(SUGGESTED_MODELS) as AiModelProvider[]
 
   for (const provider of providerOrder) {
-    if (enabledProviders && !enabledProviders.has(provider)) continue
+    const oauthProvider = isOAuthProvider(provider)
+    // Gateway mode hides non-enabled API-key providers, but subscription OAuth models stay
+    // available because they bill the user's plan, not the gateway.
+    if (enabledProviders && !enabledProviders.has(provider) && !oauthProvider) continue
 
-    // In gateway mode, suggested models are already built-in, so don't list them.
-    if (!gatewayMode) {
+    // In gateway mode, suggested API-key models are already built-in. Still list OAuth
+    // subscription models so SuperGrok etc. can be added on top of gateway mode.
+    if (!gatewayMode || oauthProvider) {
       for (const [modelId, model] of Object.entries(SUGGESTED_MODELS[provider])) {
         options.push({
           value: encodeSelection(provider, modelId),
@@ -102,6 +137,14 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const [apiToken, setApiToken] = useState('')
   const [accountId, setAccountId] = useState('')
   const [apiUrl, setApiUrl] = useState('')
+  const [reasoningEffort, setReasoningEffort] = useState<AiReasoningEffort | undefined>(undefined)
+
+  // OAuth / subscription sign-in
+  const [useApiKeyFallback, setUseApiKeyFallback] = useState(false)
+  const [oauthBusy, setOauthBusy] = useState(false)
+  const [oauthUserCode, setOauthUserCode] = useState<string | null>(null)
+  const [oauthVerificationUri, setOauthVerificationUri] = useState<string | null>(null)
+  const oauthAttemptRef = useRef<{ [Symbol.dispose](): void } | null>(null)
 
   // Validation errors
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -114,9 +157,15 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     ? new Set(aiConfig.enabledProviders)
     : null
 
+  const disposeOauthAttempt = () => {
+    oauthAttemptRef.current?.[Symbol.dispose]()
+    oauthAttemptRef.current = null
+  }
+
   // Reset all state when dialog closes
   useEffect(() => {
     if (!visible) {
+      disposeOauthAttempt()
       setSelection(null)
       setSelectValue(undefined)
       setModelId('')
@@ -124,12 +173,26 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       setApiToken('')
       setAccountId('')
       setApiUrl('')
+      setReasoningEffort(undefined)
+      setUseApiKeyFallback(false)
+      setOauthBusy(false)
+      setOauthUserCode(null)
+      setOauthVerificationUri(null)
       setErrors({})
       setAdvancedOpen(false)
     }
   }, [visible])
 
+  // Dispose any in-flight OAuth attempt on unmount.
+  useEffect(() => () => disposeOauthAttempt(), [])
+
   const handleModelSelect = (value: string) => {
+    disposeOauthAttempt()
+    setOauthBusy(false)
+    setOauthUserCode(null)
+    setOauthVerificationUri(null)
+    setUseApiKeyFallback(false)
+
     setSelectValue(value)
     setErrors({})
     const sel = decodeSelection(value)
@@ -138,16 +201,24 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     if (sel.type === 'custom') {
       setModelId('')
       setDisplayName('')
+      setReasoningEffort(undefined)
     } else {
       setModelId(sel.modelId)
       setDisplayName(sel.displayName)
+      setReasoningEffort(defaultEffort(sel.provider, sel.modelId))
     }
     setApiToken('')
     setAccountId('')
     setApiUrl(sel.provider === 'ollama' ? 'http://localhost:11434' : '')
   }
 
-  const validate = (): boolean => {
+  const wantsOAuth =
+    !!selection &&
+    isOAuthProvider(selection.provider) &&
+    !useApiKeyFallback &&
+    (selection.type === 'custom' || suggestedPrefersOAuth(selection.provider, selection.modelId))
+
+  const validate = (forOAuth = false): boolean => {
     const newErrors: Record<string, string> = {}
 
     if (!selection) {
@@ -161,7 +232,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
     const isOllama = selection?.provider === 'ollama'
     const isCloudflare = selection?.provider === 'cloudflare'
-    const showCredentials = !gatewayMode
+    const showCredentials = !gatewayMode && !forOAuth && !wantsOAuth
 
     if (showCredentials && selection && !isOllama && !apiToken.trim()) {
       newErrors.apiToken = 'Please enter your API token'
@@ -179,29 +250,44 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     return Object.keys(newErrors).length === 0
   }
 
+  const buildProfileAndConfig = (opts?: {
+    oauth?: AiModelConfig['oauth']
+    apiToken?: string
+  }): { profile: AiChatAuthorInfo; config: AiModelConfig } => {
+    const isSuggested = selection!.type === 'suggested'
+    const finalModelId = isSuggested ? selection!.modelId : modelId.trim()
+    const finalDisplayName = isSuggested ? selection!.displayName : displayName.trim()
+
+    const profile: AiChatAuthorInfo = {
+      type: 'agent',
+      id: finalModelId,
+      name: finalDisplayName,
+    }
+
+    const config: AiModelConfig = {
+      provider: selection!.provider,
+      model: finalModelId,
+      apiToken: opts?.oauth ? '' : (gatewayMode ? '' : (opts?.apiToken ?? apiToken).trim()),
+      ...(opts?.oauth ? { oauth: opts.oauth } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+      ...(!gatewayMode && !opts?.oauth && accountId.trim() && { accountId: accountId.trim() }),
+      ...(!gatewayMode && !opts?.oauth && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
+    }
+
+    return { profile, config }
+  }
+
   const handleSubmit = async () => {
+    if (wantsOAuth) {
+      await handleOAuthSignIn()
+      return
+    }
+
     if (!validate()) return
 
     setLoading(true)
     try {
-      const isSuggested = selection!.type === 'suggested'
-      const finalModelId = isSuggested ? selection!.modelId : modelId.trim()
-      const finalDisplayName = isSuggested ? selection!.displayName : displayName.trim()
-
-      const profile: AiChatAuthorInfo = {
-        type: 'agent',
-        id: finalModelId,
-        name: finalDisplayName,
-      }
-
-      const config: AiModelConfig = {
-        provider: selection!.provider,
-        model: finalModelId,
-        apiToken: gatewayMode ? '' : apiToken.trim(),
-        ...(!gatewayMode && accountId.trim() && { accountId: accountId.trim() }),
-        ...(!gatewayMode && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
-      }
-
+      const { profile, config } = buildProfileAndConfig()
       await authenticatedApi.addModel(profile, config)
       toasts.add({ title: 'AI model added successfully', variant: 'success' })
       onSuccess()
@@ -213,12 +299,53 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     }
   }
 
+  const handleOAuthSignIn = async () => {
+    if (!selection || !isOAuthProvider(selection.provider)) return
+    if (!validate(true)) return
+
+    disposeOauthAttempt()
+    setOauthBusy(true)
+    setLoading(true)
+    setErrors({})
+
+    try {
+      const { device, attempt } = await authenticatedApi.beginAiProviderOAuth(selection.provider)
+      oauthAttemptRef.current = attempt
+      setOauthUserCode(device.userCode)
+      setOauthVerificationUri(device.verificationUri)
+
+      // Open the provider verification page. User confirms the code (or completes if URI embeds it).
+      window.open(device.verificationUri, '_blank', 'noopener,noreferrer')
+
+      const oauth = await attempt.wait()
+      const { profile, config } = buildProfileAndConfig({ oauth })
+      await authenticatedApi.addModel(profile, config)
+      toasts.add({ title: 'Signed in and model added', variant: 'success' })
+      onSuccess()
+    } catch (error: any) {
+      console.error('Failed SuperGrok OAuth:', error)
+      const message = typeof error?.message === 'string' && error.message
+        ? error.message
+        : 'Failed to sign in with SuperGrok'
+      // Cancellation from disposing the attempt is quiet enough as a toast.
+      toasts.add({ title: message, variant: 'error' })
+    } finally {
+      disposeOauthAttempt()
+      setOauthBusy(false)
+      setLoading(false)
+      setOauthUserCode(null)
+      setOauthVerificationUri(null)
+    }
+  }
+
   const options = buildOptions(gatewayMode, enabledProviders)
   const showCustomFields = selection?.type === 'custom'
   const example = selection ? exampleModel(selection.provider) : null
   const isOllama = selection?.provider === 'ollama'
   const isCloudflare = selection?.provider === 'cloudflare'
-  const showCredentials = !gatewayMode
+  const isXai = selection?.provider === 'xai'
+  const showCredentials = !gatewayMode && selection && (!wantsOAuth || useApiKeyFallback)
+  const showEffort = isXai || selection?.provider === 'openai'
 
   // Group options by provider for rendering with visual separators.
   const groupedOptions: { provider: string; items: typeof options }[] = []
@@ -241,12 +368,13 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
         <div className="space-y-4">
           {/* Model / Provider selection */}
           <Select
-            label={gatewayMode ? 'Select Provider' : 'Select Model'}
+            label={gatewayMode ? 'Select Model or Provider' : 'Select Model'}
             className="w-full text-sm"
-            placeholder={gatewayMode ? 'Choose a provider...' : 'Choose an AI model...'}
+            placeholder={gatewayMode ? 'Choose a model or provider...' : 'Choose an AI model...'}
             value={selectValue}
             onValueChange={(v) => handleModelSelect(v as string)}
             error={errors.selection}
+            disabled={oauthBusy}
             renderValue={(v) => {
               const opt = options.find(o => o.value === v)
               return opt?.label ?? String(v)
@@ -280,6 +408,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
                 onChange={(e) => { setModelId(e.target.value); setErrors(prev => ({ ...prev, modelId: '' })) }}
                 error={errors.modelId}
                 variant={errors.modelId ? 'error' : 'default'}
+                disabled={oauthBusy}
               />
 
               <Input
@@ -290,8 +419,80 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
                 onChange={(e) => { setDisplayName(e.target.value); setErrors(prev => ({ ...prev, displayName: '' })) }}
                 error={errors.displayName}
                 variant={errors.displayName ? 'error' : 'default'}
+                disabled={oauthBusy}
               />
             </>
+          )}
+
+          {/* Reasoning effort (Grok 4.5 / OpenAI Responses) */}
+          {showEffort && selection && (
+            <Select
+              label="Reasoning effort"
+              className="w-full text-sm"
+              placeholder="Default"
+              value={reasoningEffort}
+              onValueChange={(v) => setReasoningEffort(v as AiReasoningEffort)}
+              disabled={oauthBusy}
+              description={
+                isXai
+                  ? 'SuperGrok Heavy can sustain high effort. Grok 4.5 defaults to high.'
+                  : 'How hard the model thinks before answering.'
+              }
+              renderValue={(v) => EFFORT_OPTIONS.find(o => o.value === v)?.label ?? String(v)}
+            >
+              {EFFORT_OPTIONS.map(opt => (
+                <Select.Option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </Select.Option>
+              ))}
+            </Select>
+          )}
+
+          {/* SuperGrok / subscription OAuth */}
+          {wantsOAuth && (
+            <div className="rounded-lg border border-kumo-line bg-kumo-tint/40 px-4 py-3 space-y-2">
+              <p className="text-sm font-medium text-kumo-default">
+                Sign in with SuperGrok or X Premium
+              </p>
+              <p className="text-xs text-kumo-subtle">
+                Uses your xAI subscription (SuperGrok / SuperGrok Heavy / X Premium+). No API key needed.
+              </p>
+              {oauthUserCode && (
+                <div className="rounded-md bg-kumo-base border border-kumo-line px-3 py-2">
+                  <p className="text-xs text-kumo-subtle mb-1">Confirm this code if prompted:</p>
+                  <p className="text-lg font-mono tracking-widest text-kumo-default">{oauthUserCode}</p>
+                  {oauthVerificationUri && (
+                    <a
+                      href={oauthVerificationUri}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-kumo-brand hover:underline mt-1 inline-block"
+                    >
+                      Open verification page
+                    </a>
+                  )}
+                </div>
+              )}
+              <button
+                type="button"
+                className="text-xs text-kumo-subtle hover:text-kumo-default underline"
+                onClick={() => setUseApiKeyFallback(true)}
+                disabled={oauthBusy}
+              >
+                Use an xAI API key instead
+              </button>
+            </div>
+          )}
+
+          {isOAuthProvider(selection?.provider as AiModelProvider) && useApiKeyFallback && (
+            <button
+              type="button"
+              className="text-xs text-kumo-subtle hover:text-kumo-default underline"
+              onClick={() => setUseApiKeyFallback(false)}
+              disabled={oauthBusy}
+            >
+              Back to SuperGrok sign-in
+            </button>
           )}
 
           {/* Cloudflare account ID (the Workers AI REST endpoint is account-scoped) */}
@@ -317,6 +518,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
                   ? 'Optional for local Ollama access'
                   : isCloudflare
                   ? 'An API token with Workers AI Read + Edit permissions (in the dashboard: Workers AI > Use REST API > Create a Workers AI API Token)'
+                  : isXai
+                  ? 'Your xAI API key (console.x.ai). Prefer SuperGrok sign-in if you have a subscription.'
                   : `Your ${PROVIDER_LABELS[selection.provider]} API token for billing`
               }
               value={apiToken}
@@ -370,9 +573,9 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             variant="primary"
             onClick={handleSubmit}
             loading={loading}
-            disabled={!selection}
+            disabled={!selection || oauthBusy}
           >
-            Add Model
+            {wantsOAuth ? 'Sign in with SuperGrok' : 'Add Model'}
           </Button>
         </div>
       </Dialog>

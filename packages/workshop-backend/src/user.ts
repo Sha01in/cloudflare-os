@@ -7,6 +7,7 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { createWorkshopLogger } from "./observability";
 import { getAiGatewayConfig } from "./ai-gateway.js";
+import { refreshAiModelOAuthIfNeeded } from "./ai-provider-oauth.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
@@ -533,8 +534,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
     let gwConfig = getAiGatewayConfig(this.env);
-    if (gwConfig && !gwConfig.providers.has(config.provider)) {
+    // Subscription OAuth models authenticate with the user's own plan and never use platform
+    // AI Gateway provider keys, so they remain addable even when gateway mode is enabled.
+    if (gwConfig && !config.oauth && !gwConfig.providers.has(config.provider)) {
       throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
+    }
+    if (config.oauth) {
+      if (!config.oauth.access || !config.oauth.refresh || !config.oauth.expires) {
+        throw new Error("OAuth model config is missing access/refresh tokens.");
+      }
+      // OAuth models don't need an API key; keep the field empty for the type.
+      config = { ...config, apiToken: "" };
     }
 
     profile.type = "agent";
@@ -669,7 +679,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
              resetAt: nextUtcMidnightIso() };
   }
 
-  // DO NOT MAKE PUBLIC -- returns API keys.
+  // DO NOT MAKE PUBLIC -- returns API keys / OAuth tokens.
   async getChatContext(modelId: string | null): Promise<UserChatContext> {
     let gwConfig = getAiGatewayConfig(this.env);
 
@@ -685,6 +695,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         result.aiModel = this.storage.aiModels.get(modelId);
       }
       if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
+      result.aiModel = await this.#withFreshOAuth(result.aiModel);
     }
 
     // Resolve the quick model (used for lightweight tasks like title generation).
@@ -696,11 +707,36 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (quickModelId) {
         let quickModel = this.storage.aiModels.get(quickModelId);
         if (quickModel) {
+          quickModel = await this.#withFreshOAuth(quickModel);
           result.quickModel = quickModel.config;
         }
       }
     }
     return result;
+  }
+
+  // Refresh subscription OAuth tokens on the stored model record when near expiry, then return
+  // the (possibly updated) record. No-op for API-key models.
+  async #withFreshOAuth(record: UserAiModelRecord): Promise<UserAiModelRecord> {
+    const oauth = record.config.oauth;
+    if (!oauth) return record;
+    try {
+      const refreshed = await refreshAiModelOAuthIfNeeded(record.config.provider, oauth);
+      if (refreshed === oauth) return record;
+      const updated: UserAiModelRecord = {
+        profile: record.profile,
+        config: { ...record.config, oauth: refreshed, apiToken: "" },
+      };
+      this.storage.aiModels.put(updated);
+      return updated;
+    } catch (error) {
+      // Surface a clear re-auth message rather than a cryptic provider 401 mid-turn.
+      throw new Error(
+        `Failed to refresh ${record.config.provider} subscription credentials for model ` +
+        `"${record.profile.name}". Re-add the model and sign in again.`,
+        { cause: error },
+      );
+    }
   }
 
   async getExternalMessageChatContext(existingChatModelId: string | null): Promise<UserChatContext> {

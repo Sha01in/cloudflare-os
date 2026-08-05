@@ -364,6 +364,46 @@ describe("getModel direct routing (no gateway)", () => {
       expect(handle.model.baseUrl).toBe("http://my-ollama:11434/v1");
     }
   });
+
+  it("routes SuperGrok OAuth models directly to xAI with the access token", async () => {
+    // Subscription OAuth always bypasses AI Gateway even when the platform gateway is configured.
+    const handle = getModel(env(), {
+      provider: "xai",
+      model: "grok-4.5",
+      apiToken: "",
+      oauth: {
+        access: "xai-access-token",
+        refresh: "xai-refresh-token",
+        expires: Date.now() + 60_000,
+      },
+      reasoningEffort: "high",
+    }, INITIATOR);
+
+    expect(handle.model.api).toBe("openai-responses");
+    expect(handle.model.provider).toBe("xai");
+    expect(handle.model.baseUrl).toBe("https://api.x.ai/v1");
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
+
+    const request = await captureRequest(handle);
+    expect(request.url).toContain("https://api.x.ai/v1/");
+    expect(request.headers.get("authorization")).toBe("Bearer xai-access-token");
+    expect(request.headers.get("cf-aig-authorization")).toBeNull();
+    // High effort is the SuperGrok default for grok-4.5.
+    const body = JSON.parse(request.body) as { reasoning?: { effort?: string } };
+    expect(body.reasoning?.effort).toBe("high");
+  }, 15000);
+
+  it("defaults Grok 4.5 suggested effort to high when config omits it", async () => {
+    const handle = getModel(env({ CF_AI_GATEWAY: undefined }), {
+      provider: "xai",
+      model: "grok-4.5",
+      apiToken: "xai-api-key",
+    }, INITIATOR);
+
+    const request = await captureRequest(handle);
+    const body = JSON.parse(request.body) as { reasoning?: { effort?: string } };
+    expect(body.reasoning?.effort).toBe("high");
+  }, 15000);
 });
 
 describe("PDF attachment bridging", () => {
