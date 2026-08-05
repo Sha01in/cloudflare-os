@@ -453,6 +453,17 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void>;
 
+  /**
+   * Begin a subscription OAuth login for an AI provider (device-code flow). Returns a device
+   * code the client shows/opens, plus an `attempt` stub whose `wait()` resolves with tokens
+   * once the user finishes authorization. Dispose `attempt` to abandon. Tokens are not
+   * stored until the client calls `addModel()` with them in `config.oauth`.
+   */
+  beginAiProviderOAuth(provider: AiOAuthProvider): Promise<{
+    device: AiProviderOAuthDeviceCode;
+    attempt: RpcStub<AiProviderOAuthAttempt>;
+  }>;
+
   /** Deletes a configured model. */
   deleteModel(id: string): Promise<void>;
 
@@ -1232,7 +1243,17 @@ export type CloudflareAccountOption = {
 };
 
 /** Supported AI providers. */
-export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama" | "xai";
+
+/**
+ * Providers that can authenticate via a consumer subscription OAuth flow (no API key
+ * required). Device-code login is used so the Workshop backend never hosts an OAuth
+ * callback server.
+ */
+export type AiOAuthProvider = "xai";
+
+/** Reasoning effort for models that expose it (OpenAI Responses / xAI Grok 4.5, etc.). */
+export type AiReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /** Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`. */
 export type AiGatewayInfo = {
@@ -1242,6 +1263,45 @@ export type AiGatewayInfo = {
   enabled: false;
 };
 
+/**
+ * OAuth tokens for a subscription-backed AI provider. Stored on the user DO with the model
+ * config and refreshed server-side before chat turns when `expires` is near.
+ */
+export type AiModelOAuthCredential = {
+  /** Short-lived access token used as the provider bearer credential. */
+  access: string;
+  /** Long-lived refresh token used to mint new access tokens. */
+  refresh: string;
+  /** Epoch ms after which `access` should be treated as expired (already skewed early). */
+  expires: number;
+};
+
+/** Device-code challenge shown while the user authorizes a subscription AI provider. */
+export type AiProviderOAuthDeviceCode = {
+  /** Short code the user confirms on the provider's verification page. */
+  userCode: string;
+  /**
+   * HTTPS URL the client opens (may include the user code as a query param when the
+   * provider returns `verification_uri_complete`).
+   */
+  verificationUri: string;
+  /** Seconds until the device code expires. */
+  expiresInSeconds: number;
+};
+
+/**
+ * A pending subscription OAuth attempt started by `AuthenticatedApi.beginAiProviderOAuth()`.
+ * Holding this stub is the capability to receive the resulting tokens; dispose it to abandon.
+ */
+export interface AiProviderOAuthAttempt extends RpcTarget {
+  /**
+   * Resolves with OAuth tokens once the user completes authorization in the browser, or
+   * rejects if the attempt fails, expires, or is abandoned. Safe to call immediately after
+   * `beginAiProviderOAuth()`.
+   */
+  wait(): Promise<AiModelOAuthCredential>;
+}
+
 /** Configuration specifying how to connect to an AI model provider. */
 export type AiModelConfig = {
   /** Which AI provider hosts the model? */
@@ -1250,8 +1310,24 @@ export type AiModelConfig = {
   /** Name of the specific model, as specified to the provider's API. */
   model: string;
 
-  /** Secret API token for the respective provider, for billing purposes. */
+  /**
+   * Secret API token for the respective provider, for billing purposes. Empty string when the
+   * model authenticates via `oauth` instead.
+   */
   apiToken: string;
+
+  /**
+   * Subscription OAuth credentials (e.g. SuperGrok / X Premium). When set, inference uses the
+   * access token directly against the provider and bypasses AI Gateway provider keys. The
+   * access token is refreshed from `refresh` before use when near expiry.
+   */
+  oauth?: AiModelOAuthCredential;
+
+  /**
+   * Preferred reasoning effort for models that support it. Defaults to provider/handle
+   * defaults when omitted (currently medium for OpenAI Responses-style APIs).
+   */
+  reasoningEffort?: AiReasoningEffort;
 
   /**
    * Cloudflare account ID owning the Workers AI deployment the token authorizes. Required for
@@ -1284,11 +1360,20 @@ type SuggestedModel = {
   outputLimit?: number;
 
   /**
-   * When present, the prompt size compaction keeps the chat under. Set below the window for models
-   * whose input is priced higher past a threshold (GPT-5.6 doubles above 272K), so ordinary use
-   * stays in the cheaper tier while the window remains the hard limit.
+   * When present, the prompt size compaction keeps the chat under. Set below the window for
+   * models whose input is priced higher past a threshold (GPT-5.6 doubles above 272K), so
+   * ordinary use stays in the cheaper tier while the window remains the hard limit.
    */
   compactionInputBudget?: number;
+
+  /** Default reasoning effort when the model supports it. */
+  reasoningEffort?: AiReasoningEffort;
+
+  /**
+   * When true, the model is intended to be added via subscription OAuth (e.g. SuperGrok),
+   * not an API key. The add-model UI still allows an API-key fallback under advanced settings.
+   */
+  oauthPreferred?: boolean;
 };
 
 // The literal is kept apart from the export so SuggestedModelId can derive the model ids from it.
@@ -1333,6 +1418,28 @@ const SUGGESTED_MODEL_CATALOG = {
   },
   "google": {
     "gemini-3.6-flash": {name: "Gemini 3.6 Flash", contextWindow: 1048576},
+  },
+  "xai": {
+    // Subscription (SuperGrok / SuperGrok Heavy / X Premium+) is the normal path; API keys work too.
+    "grok-4.5": {
+      name: "Grok 4.5 (SuperGrok)",
+      contextWindow: 500000,
+      outputLimit: 128000,
+      reasoningEffort: "high",
+      oauthPreferred: true,
+    },
+    "grok-4.3": {
+      name: "Grok 4.3 (SuperGrok)",
+      contextWindow: 1000000,
+      outputLimit: 30000,
+      oauthPreferred: true,
+    },
+    "grok-build-0.1": {
+      name: "Grok Build 0.1 (SuperGrok)",
+      contextWindow: 256000,
+      outputLimit: 128000,
+      oauthPreferred: true,
+    },
   },
   "ollama": {
   },
