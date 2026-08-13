@@ -455,10 +455,10 @@ export interface AuthenticatedApi extends RpcTarget {
   addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void>;
 
   /**
-   * Begin a subscription OAuth login for an AI provider (device-code flow). Returns a device
-   * code the client shows/opens, plus an `attempt` stub. `wait()` resolves when the user
-   * finishes authorization (no tokens on the wire). Then call `attempt.addModel()` to
-   * persist the model; credentials stay on the user Durable Object. Dispose `attempt` to
+   * Begin a subscription OAuth login for an AI provider (device-code flow). Returns a
+   * device code the client shows/opens, plus an `attempt` stub. Call
+   * `attempt.addModel()` to wait for authorization and persist the model in one
+   * user-DO RPC. Credentials never leave that Durable Object. Dispose `attempt` to
    * abandon.
    */
   beginAiProviderOAuth(provider: AiOAuthProvider): Promise<{
@@ -1299,16 +1299,10 @@ export type AiProviderOAuthDeviceCode = {
  */
 export interface AiProviderOAuthAttempt extends RpcTarget {
   /**
-   * Resolves once the user completes authorization in the browser, or rejects if the
-   * attempt fails, expires, or is abandoned. Prefer `addModel()` alone: it waits then
-   * persists in one user-DO RPC so a completed grant cannot vanish between calls.
-   */
-  wait(): Promise<void>;
-
-  /**
-   * Persist a model using the credentials from this attempt. Waits for authorization if
-   * `wait()` has not already completed. `config.oauth` must be omitted — tokens are attached
-   * server-side. The attempt is consumed and cannot be reused.
+   * Persist a model using this attempt's credentials. Waits for authorization if
+   * needed, then writes the model on the user Durable Object in the same RPC.
+   * `config.oauth` must be omitted — tokens are attached server-side. The attempt
+   * is consumed and cannot be reused.
    */
   addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void>;
 }
