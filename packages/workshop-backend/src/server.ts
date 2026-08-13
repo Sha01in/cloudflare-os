@@ -145,7 +145,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     device: AiProviderOAuthDeviceCode;
     attempt: AiProviderOAuthAttempt;
   }> {
-    const { device, attempt } = await this.user.beginAiProviderOAuth(provider);
+    const { device, attempt } = await this.#user.beginAiProviderOAuth(provider);
     // Same shape as startGatekeeperLogin: wrap the DO-side target so the wire type is a
     // Worker RpcTarget. addModel() still runs on the user DO (tokens stay there).
     return { device, attempt: new AiProviderOAuthAttemptProxy(attempt) };
