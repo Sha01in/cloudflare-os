@@ -160,6 +160,7 @@ type StoredPendingAiOAuth = {
   id: string;
   provider: AiOAuthProvider;
   device: DeviceAuthorization;
+  createdAt: number;
 };
 
 function makeUserStorage(storage: DurableObjectStorage) {
@@ -325,8 +326,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
   private vendors: Map<string, Service<GatekeeperVendor>>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
-  // In-memory device-code attempts. An in-flight wait() RPC keeps this DO awake, same as
-  // PendingLogin — no durable storage, evicted with the isolate if abandoned.
+  // In-memory live polls. Device codes (never tokens) also sit in pendingAiOAuth storage so
+  // wait()/addModel() can resume after hibernation. Drop expired rows on load.
   #pendingAiOAuth = new Map<string, PendingAiOAuth>();
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
@@ -610,7 +611,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       device,
       abort: new AbortController(),
     });
-    this.storage.pendingAiOAuth.put({ id: attemptId, provider, device });
+    this.storage.pendingAiOAuth.put({ id: attemptId, provider, device, createdAt: Date.now() });
     return {
       device: toDeviceCodeInfo(device),
       attempt: new AiProviderOAuthAttemptImpl(this, attemptId),
@@ -622,6 +623,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (live) return live;
     const stored = this.storage.pendingAiOAuth.get(attemptId);
     if (!stored) return undefined;
+    const ttlMs = stored.device.expiresInSeconds * 1000;
+    if (Date.now() - stored.createdAt >= ttlMs) {
+      this.storage.pendingAiOAuth.delete(attemptId);
+      return undefined;
+    }
     const restored: PendingAiOAuth = {
       provider: stored.provider,
       device: stored.device,

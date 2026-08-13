@@ -22,9 +22,14 @@ describe("xAI OAuth helpers", () => {
       .toThrow("Untrusted verification URI");
   });
 
-  it("accepts https verification URIs", () => {
+  it("accepts https verification URIs on auth.x.ai", () => {
     expect(validateVerificationUri("https://auth.x.ai/device?user_code=ABCD"))
       .toBe("https://auth.x.ai/device?user_code=ABCD");
+  });
+
+  it("rejects https URIs that are not auth.x.ai", () => {
+    expect(() => validateVerificationUri("https://evil.example/phish"))
+      .toThrow("Untrusted verification URI");
   });
 
   it("prefers verification_uri_complete when present", () => {

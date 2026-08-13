@@ -47,8 +47,8 @@ export function positiveNumber(body: JsonObject, field: string): number {
   return value;
 }
 
-// The verification URI is opened in the user's browser; force https so a malicious response
-// cannot make the client launch something else.
+// The verification URI is opened in the user's browser; force https://auth.x.ai so a
+// malicious token response cannot launch something else.
 export function validateVerificationUri(raw: string): string {
   let url: URL;
   try {
@@ -56,7 +56,7 @@ export function validateVerificationUri(raw: string): string {
   } catch {
     throw new Error("Untrusted verification URI in xAI OAuth response");
   }
-  if (url.protocol !== "https:") {
+  if (url.protocol !== "https:" || url.hostname !== "auth.x.ai") {
     throw new Error("Untrusted verification URI in xAI OAuth response");
   }
   return url.href;
