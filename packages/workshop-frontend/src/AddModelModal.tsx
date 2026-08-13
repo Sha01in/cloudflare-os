@@ -315,7 +315,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       // Open the provider verification page. User confirms the code (or completes if URI embeds it).
       window.open(device.verificationUri, '_blank', 'noopener,noreferrer')
 
-      await attempt.wait()
+      // addModel waits for the device grant on the user DO, then persists. Do not wait() first:
+      // a completed grant is memory-only and would be lost if the DO evicted between RPCs.
       const { profile, config } = buildProfileAndConfig()
       await attempt.addModel(profile, config)
       toasts.add({ title: 'Signed in and model added', variant: 'success' })

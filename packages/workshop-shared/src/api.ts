@@ -1299,8 +1299,9 @@ export type AiProviderOAuthDeviceCode = {
  */
 export interface AiProviderOAuthAttempt extends RpcTarget {
   /**
-   * Resolves once the user completes authorization in the browser, or rejects if the attempt
-   * fails, expires, or is abandoned. Safe to call immediately after `beginAiProviderOAuth()`.
+   * Resolves once the user completes authorization in the browser, or rejects if the
+   * attempt fails, expires, or is abandoned. Prefer `addModel()` alone: it waits then
+   * persists in one user-DO RPC so a completed grant cannot vanish between calls.
    */
   wait(): Promise<void>;
 
