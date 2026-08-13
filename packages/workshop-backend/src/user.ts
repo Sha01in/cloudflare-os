@@ -188,6 +188,12 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return result === 0;
 }
 
+type StoredPendingAiOAuth = {
+  id: string;
+  provider: AiOAuthProvider;
+  device: DeviceAuthorization;
+};
+
 function makeUserStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
     collections: {
@@ -224,6 +230,11 @@ function makeUserStorage(storage: DurableObjectStorage) {
         nonUniqueIndexes: {
           byWorkspace(record: OutputRecord) { return record.workspaceId; },
         },
+      }),
+      // Device-code OAuth attempts that have begun but not yet completed. Survives DO hibernation
+      // between beginAiProviderOAuth() returning and wait() arriving. Tokens are never stored here.
+      pendingAiOAuth: collection<StoredPendingAiOAuth>()({
+        primaryKey: "id",
       }),
     },
     singletons: {
@@ -677,14 +688,29 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       device,
       abort: new AbortController(),
     });
+    this.storage.pendingAiOAuth.put({ id: attemptId, provider, device });
     return {
       device: toDeviceCodeInfo(device),
       attempt: new AiProviderOAuthAttemptImpl(this, attemptId),
     };
   }
 
+  #loadPendingAiOAuth(attemptId: string): PendingAiOAuth | undefined {
+    const live = this.#pendingAiOAuth.get(attemptId);
+    if (live) return live;
+    const stored = this.storage.pendingAiOAuth.get(attemptId);
+    if (!stored) return undefined;
+    const restored: PendingAiOAuth = {
+      provider: stored.provider,
+      device: stored.device,
+      abort: new AbortController(),
+    };
+    this.#pendingAiOAuth.set(attemptId, restored);
+    return restored;
+  }
+
   async waitAiProviderOAuth(attemptId: string): Promise<void> {
-    const pending = this.#pendingAiOAuth.get(attemptId);
+    const pending = this.#loadPendingAiOAuth(attemptId);
     if (!pending) throw new Error("OAuth attempt is gone or was cancelled.");
     if (pending.credential) return;
     if (!pending.waitPromise) {
@@ -700,7 +726,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     attemptId: string, profile: AiChatAuthorInfo, config: AiModelConfig,
   ): Promise<void> {
     await this.waitAiProviderOAuth(attemptId);
-    const pending = this.#pendingAiOAuth.get(attemptId);
+    const pending = this.#loadPendingAiOAuth(attemptId);
     if (!pending?.credential) throw new Error("OAuth attempt is gone or was cancelled.");
     if (config.oauth) {
       throw new Error(
@@ -711,6 +737,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         `OAuth provider mismatch: signed in with "${pending.provider}", adding "${config.provider}".`);
     }
     this.#pendingAiOAuth.delete(attemptId);
+    this.storage.pendingAiOAuth.delete(attemptId);
     profile.type = "agent";
     this.storage.aiModels.put({
       profile,
@@ -720,9 +747,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   cancelAiProviderOAuth(attemptId: string): void {
     const pending = this.#pendingAiOAuth.get(attemptId);
-    if (!pending) return;
-    pending.abort.abort();
-    this.#pendingAiOAuth.delete(attemptId);
+    if (pending) {
+      pending.abort.abort();
+      this.#pendingAiOAuth.delete(attemptId);
+    }
+    this.storage.pendingAiOAuth.delete(attemptId);
   }
 
   async deleteModel(id: string): Promise<void> {
