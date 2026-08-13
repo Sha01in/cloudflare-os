@@ -1,5 +1,6 @@
-import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { RpcStub, RpcTarget } from "capnweb";
+import { validateRpc } from "capnweb-validate";
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, AiOAuthProvider, AiProviderOAuthAttempt, AiProviderOAuthDeviceCode, AiModelOAuthCredential } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -7,7 +8,13 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { createWorkshopLogger } from "./observability";
 import { getAiGatewayConfig } from "./ai-gateway.js";
-import { refreshAiModelOAuthIfNeeded } from "./ai-provider-oauth.js";
+import {
+  pollXaiDeviceTokens,
+  refreshAiModelOAuthIfNeeded,
+  requestXaiDeviceCode,
+  toDeviceCodeInfo,
+  type DeviceAuthorization,
+} from "./ai-provider-oauth.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
@@ -273,11 +280,43 @@ async function checkGatekeeperVendorFilter(
   }
 }
 
+type PendingAiOAuth = {
+  provider: AiOAuthProvider;
+  device: DeviceAuthorization;
+  credential?: AiModelOAuthCredential;
+  abort: AbortController;
+  waitPromise?: Promise<void>;
+};
+
+// Capability for one SuperGrok/xAI device-code attempt. Lives on the user DO so tokens never
+// cross to the client. Dispose (or abandon wait) cancels polling.
+@validateRpc()
+class AiProviderOAuthAttemptImpl extends RpcTarget implements AiProviderOAuthAttempt {
+  constructor(private user: UserDurableObject, private attemptId: string) {
+    super();
+  }
+
+  wait(): Promise<void> {
+    return this.user.waitAiProviderOAuth(this.attemptId);
+  }
+
+  addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
+    return this.user.addModelFromAiOAuth(this.attemptId, profile, config);
+  }
+
+  [Symbol.dispose](): void {
+    this.user.cancelAiProviderOAuth(this.attemptId);
+  }
+}
+
 // Durable Object that stores information about a user.
 export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
   private vendors: Map<string, Service<GatekeeperVendor>>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
+  // In-memory device-code attempts. An in-flight wait() RPC keeps this DO awake, same as
+  // PendingLogin — no durable storage, evicted with the isolate if abandoned.
+  #pendingAiOAuth = new Map<string, PendingAiOAuth>();
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -533,22 +572,79 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
-    let gwConfig = getAiGatewayConfig(this.env);
-    // Subscription OAuth models authenticate with the user's own plan and never use platform
-    // AI Gateway provider keys, so they remain addable even when gateway mode is enabled.
-    if (gwConfig && !config.oauth && !gwConfig.providers.has(config.provider)) {
-      throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
-    }
     if (config.oauth) {
-      if (!config.oauth.access || !config.oauth.refresh || !config.oauth.expires) {
-        throw new Error("OAuth model config is missing access/refresh tokens.");
-      }
-      // OAuth models don't need an API key; keep the field empty for the type.
-      config = { ...config, apiToken: "" };
+      throw new Error(
+        "OAuth tokens cannot be supplied by the client. Sign in with the provider attempt instead.");
+    }
+    let gwConfig = getAiGatewayConfig(this.env);
+    if (gwConfig && !gwConfig.providers.has(config.provider)) {
+      throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
     }
 
     profile.type = "agent";
     this.storage.aiModels.put({profile, config});
+  }
+
+  async beginAiProviderOAuth(provider: AiOAuthProvider): Promise<{
+    device: AiProviderOAuthDeviceCode;
+    attempt: AiProviderOAuthAttemptImpl;
+  }> {
+    if (provider !== "xai") {
+      throw new Error(`Unsupported AI OAuth provider: ${provider}`);
+    }
+    const device = await requestXaiDeviceCode();
+    const attemptId = crypto.randomUUID();
+    this.#pendingAiOAuth.set(attemptId, {
+      provider,
+      device,
+      abort: new AbortController(),
+    });
+    return {
+      device: toDeviceCodeInfo(device),
+      attempt: new AiProviderOAuthAttemptImpl(this, attemptId),
+    };
+  }
+
+  async waitAiProviderOAuth(attemptId: string): Promise<void> {
+    const pending = this.#pendingAiOAuth.get(attemptId);
+    if (!pending) throw new Error("OAuth attempt is gone or was cancelled.");
+    if (pending.credential) return;
+    if (!pending.waitPromise) {
+      pending.waitPromise = pollXaiDeviceTokens(pending.device, pending.abort.signal)
+        .then((credential) => {
+          pending.credential = credential;
+        });
+    }
+    await pending.waitPromise;
+  }
+
+  async addModelFromAiOAuth(
+    attemptId: string, profile: AiChatAuthorInfo, config: AiModelConfig,
+  ): Promise<void> {
+    await this.waitAiProviderOAuth(attemptId);
+    const pending = this.#pendingAiOAuth.get(attemptId);
+    if (!pending?.credential) throw new Error("OAuth attempt is gone or was cancelled.");
+    if (config.oauth) {
+      throw new Error(
+        "OAuth tokens cannot be supplied by the client. Sign in with the provider attempt instead.");
+    }
+    if (config.provider !== pending.provider) {
+      throw new Error(
+        `OAuth provider mismatch: signed in with "${pending.provider}", adding "${config.provider}".`);
+    }
+    this.#pendingAiOAuth.delete(attemptId);
+    profile.type = "agent";
+    this.storage.aiModels.put({
+      profile,
+      config: { ...config, apiToken: "", oauth: pending.credential },
+    });
+  }
+
+  cancelAiProviderOAuth(attemptId: string): void {
+    const pending = this.#pendingAiOAuth.get(attemptId);
+    if (!pending) return;
+    pending.abort.abort();
+    this.#pendingAiOAuth.delete(attemptId);
   }
 
   async deleteModel(id: string): Promise<void> {

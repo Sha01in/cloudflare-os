@@ -16,7 +16,6 @@ export { PendingLogin, LoginConnectCallbackImpl };
 import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
-import { beginAiProviderOAuth } from "./ai-provider-oauth.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
 import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
@@ -137,13 +136,19 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
   beginAiProviderOAuth(provider: AiOAuthProvider): Promise<{
     device: AiProviderOAuthDeviceCode;
-    attempt: RpcStub<AiProviderOAuthAttempt>;
+    attempt: AiProviderOAuthAttempt;
   }> {
-    // Same cast pattern as startGatekeeperLogin: concrete RpcTarget -> wire stub type.
-    return beginAiProviderOAuth(provider) as unknown as Promise<{
-      device: AiProviderOAuthDeviceCode;
-      attempt: RpcStub<AiProviderOAuthAttempt>;
-    }>;
+    return this.#beginAiProviderOAuth(provider);
+  }
+
+  async #beginAiProviderOAuth(provider: AiOAuthProvider): Promise<{
+    device: AiProviderOAuthDeviceCode;
+    attempt: AiProviderOAuthAttempt;
+  }> {
+    const { device, attempt } = await this.user.beginAiProviderOAuth(provider);
+    // Same shape as startGatekeeperLogin: wrap the DO-side target so the wire type is a
+    // Worker RpcTarget. wait()/addModel() still run on the user DO (tokens stay there).
+    return { device, attempt: new AiProviderOAuthAttemptProxy(attempt) };
   }
   deleteModel(id: string): Promise<void> {
     return this.#user.deleteModel(id);
@@ -639,6 +644,28 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
 
   async wait(): Promise<string> {
     return await this.pending.awaitResult();
+  }
+}
+
+// Forwards SuperGrok device-code wait/addModel to the user DO attempt. Tokens never enter this
+// Worker; disposing cancels the DO-side poll.
+@validateRpc()
+class AiProviderOAuthAttemptProxy extends RpcTarget implements AiProviderOAuthAttempt {
+  constructor(private inner: AiProviderOAuthAttempt) {
+    super();
+  }
+
+  wait(): Promise<void> {
+    return this.inner.wait();
+  }
+
+  addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
+    return this.inner.addModel(profile, config);
+  }
+
+  [Symbol.dispose](): void {
+    const disposable = this.inner as AiProviderOAuthAttempt & { [Symbol.dispose]?: () => void };
+    disposable[Symbol.dispose]?.();
   }
 }
 

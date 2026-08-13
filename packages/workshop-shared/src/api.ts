@@ -336,16 +336,17 @@ export interface AuthenticatedApi extends RpcTarget {
   listModels(): Promise<AiChatAuthorInfo[]>;
 
   // Adds a new model to the user's configured set. The ID must be unique among the user's
-  // configured models.
+  // configured models. Do not put subscription OAuth tokens in `config.oauth` — those are
+  // written only by a completed `AiProviderOAuthAttempt.addModel()`.
   addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void>;
 
-  // Begin a subscription OAuth login for an AI provider (device-code flow). Returns a device code
-  // the client shows/opens, plus an `attempt` stub whose `wait()` resolves with tokens once the
-  // user finishes authorization. Dispose `attempt` to abandon. Tokens are not stored until the
-  // client calls `addModel()` with them in `config.oauth`.
+  // Begin a subscription OAuth login for an AI provider (device-code flow). Returns a device
+  // code the client shows/opens, plus an `attempt` stub. `wait()` resolves when the user
+  // finishes authorization (no tokens on the wire). Then call `attempt.addModel()` to persist
+  // the model; credentials stay on the user Durable Object. Dispose `attempt` to abandon.
   beginAiProviderOAuth(provider: AiOAuthProvider): Promise<{
     device: AiProviderOAuthDeviceCode;
-    attempt: RpcStub<AiProviderOAuthAttempt>;
+    attempt: AiProviderOAuthAttempt;
   }>;
 
   // Deletes a configured model.
@@ -986,8 +987,9 @@ export type AiGatewayInfo = {
   enabled: false;
 };
 
-// OAuth tokens for a subscription-backed AI provider. Stored on the user DO with the model config
-// and refreshed server-side before chat turns when `expires` is near.
+// OAuth tokens for a subscription-backed AI provider. Stored on the user Durable Object with the
+// model config and refreshed server-side before chat turns when `expires` is near. Never returned
+// to the client and not accepted on `AuthenticatedApi.addModel()`.
 export type AiModelOAuthCredential = {
   // Short-lived access token used as the provider bearer credential.
   access: string;
@@ -1009,12 +1011,17 @@ export type AiProviderOAuthDeviceCode = {
 };
 
 // A pending subscription OAuth attempt started by `AuthenticatedApi.beginAiProviderOAuth()`.
-// Holding this stub is the capability to receive the resulting tokens; dispose it to abandon.
+// Holding this stub is the capability to finish sign-in and persist the model; dispose it to
+// abandon. Tokens never appear on this interface.
 export interface AiProviderOAuthAttempt extends RpcTarget {
-  // Resolves with OAuth tokens once the user completes authorization in the browser, or rejects
-  // if the attempt fails, expires, or is abandoned. Safe to call immediately after
-  // `beginAiProviderOAuth()`.
-  wait(): Promise<AiModelOAuthCredential>;
+  // Resolves once the user completes authorization in the browser, or rejects if the attempt
+  // fails, expires, or is abandoned. Safe to call immediately after `beginAiProviderOAuth()`.
+  wait(): Promise<void>;
+
+  // Persist a model using the credentials from this attempt. Waits for authorization if
+  // `wait()` has not already completed. `config.oauth` must be omitted — tokens are attached
+  // server-side. The attempt is consumed and cannot be reused.
+  addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void>;
 }
 
 // Configuration specifying how to connect to an AI model provider.
@@ -1029,9 +1036,8 @@ export type AiModelConfig = {
   // model authenticates via `oauth` instead.
   apiToken: string;
 
-  // Subscription OAuth credentials (e.g. SuperGrok / X Premium). When set, inference uses the
-  // access token directly against the provider and bypasses AI Gateway provider keys. The access
-  // token is refreshed from `refresh` before use when near expiry.
+  // Subscription OAuth credentials (e.g. SuperGrok / X Premium). Server-side only: written by
+  // `AiProviderOAuthAttempt.addModel()` and read by inference. Clients must omit this field.
   oauth?: AiModelOAuthCredential;
 
   // Preferred reasoning effort for models that support it. Defaults to provider/handle defaults

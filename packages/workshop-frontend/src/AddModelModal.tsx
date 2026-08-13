@@ -251,7 +251,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   }
 
   const buildProfileAndConfig = (opts?: {
-    oauth?: AiModelConfig['oauth']
     apiToken?: string
   }): { profile: AiChatAuthorInfo; config: AiModelConfig } => {
     const isSuggested = selection!.type === 'suggested'
@@ -267,11 +266,10 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     const config: AiModelConfig = {
       provider: selection!.provider,
       model: finalModelId,
-      apiToken: opts?.oauth ? '' : (gatewayMode ? '' : (opts?.apiToken ?? apiToken).trim()),
-      ...(opts?.oauth ? { oauth: opts.oauth } : {}),
+      apiToken: gatewayMode ? '' : (opts?.apiToken ?? apiToken).trim(),
       ...(reasoningEffort ? { reasoningEffort } : {}),
-      ...(!gatewayMode && !opts?.oauth && accountId.trim() && { accountId: accountId.trim() }),
-      ...(!gatewayMode && !opts?.oauth && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
+      ...(!gatewayMode && accountId.trim() && { accountId: accountId.trim() }),
+      ...(!gatewayMode && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
     }
 
     return { profile, config }
@@ -317,9 +315,9 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       // Open the provider verification page. User confirms the code (or completes if URI embeds it).
       window.open(device.verificationUri, '_blank', 'noopener,noreferrer')
 
-      const oauth = await attempt.wait()
-      const { profile, config } = buildProfileAndConfig({ oauth })
-      await authenticatedApi.addModel(profile, config)
+      await attempt.wait()
+      const { profile, config } = buildProfileAndConfig()
+      await attempt.addModel(profile, config)
       toasts.add({ title: 'Signed in and model added', variant: 'success' })
       onSuccess()
     } catch (error: any) {

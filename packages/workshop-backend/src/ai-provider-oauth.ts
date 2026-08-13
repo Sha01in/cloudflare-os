@@ -1,20 +1,17 @@
 // Subscription OAuth for AI providers (device-code grant).
 //
-// Mirrors the pi-ai xAI device-code client, but is Workers-safe (fetch only — no loopback
-// callback server). Tokens land in the user DO via `addModel({ oauth })` after the client
-// finishes `attempt.wait()`.
+// Workers-safe (fetch only — no loopback callback server). Device authorization and token
+// refresh live here; the User Durable Object owns pending attempts so tokens never leave
+// the isolate.
 
-import { RpcTarget } from "capnweb";
-import { validateRpc } from "capnweb-validate";
 import type {
   AiModelOAuthCredential,
   AiOAuthProvider,
-  AiProviderOAuthAttempt,
   AiProviderOAuthDeviceCode,
 } from "@gadgets/workshop-shared/api";
 
 // Public client id used by pi/Hermes-style SuperGrok device-code login. Not a secret.
-const XAI_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
+export const XAI_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
 const XAI_SCOPE = "openid profile email offline_access grok-cli:access api:access";
 const XAI_DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code";
 const XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token";
@@ -26,7 +23,7 @@ const DEFAULT_POLL_INTERVAL_SECONDS = 5;
 
 type JsonObject = Record<string, unknown>;
 
-type DeviceAuthorization = {
+export type DeviceAuthorization = {
   deviceCode: string;
   userCode: string;
   verificationUri: string;
@@ -34,7 +31,7 @@ type DeviceAuthorization = {
   expiresInSeconds: number;
 };
 
-function requiredString(body: JsonObject, field: string): string {
+export function requiredString(body: JsonObject, field: string): string {
   const value = body[field];
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`Invalid xAI OAuth response field: ${field}`);
@@ -42,7 +39,7 @@ function requiredString(body: JsonObject, field: string): string {
   return value;
 }
 
-function positiveNumber(body: JsonObject, field: string): number {
+export function positiveNumber(body: JsonObject, field: string): number {
   const value = body[field];
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     throw new Error(`Invalid xAI OAuth response field: ${field}`);
@@ -52,7 +49,7 @@ function positiveNumber(body: JsonObject, field: string): number {
 
 // The verification URI is opened in the user's browser; force https so a malicious response
 // cannot make the client launch something else.
-function validateVerificationUri(raw: string): string {
+export function validateVerificationUri(raw: string): string {
   let url: URL;
   try {
     url = new URL(raw);
@@ -110,9 +107,10 @@ function requestFailure(action: string, response: { status: number; body: JsonOb
   );
 }
 
-function credentialsFromTokenResponse(
+export function credentialsFromTokenResponse(
   body: JsonObject,
   previousRefreshToken?: string,
+  nowMs: number = Date.now(),
 ): AiModelOAuthCredential {
   const access = requiredString(body, "access_token");
   // xAI may omit refresh_token on refresh when the token is not rotated.
@@ -125,11 +123,11 @@ function credentialsFromTokenResponse(
   return {
     access,
     refresh,
-    expires: Date.now() + expiresInSeconds * 1000 - REFRESH_SKEW_MS,
+    expires: nowMs + expiresInSeconds * 1000 - REFRESH_SKEW_MS,
   };
 }
 
-function parseDeviceCode(body: JsonObject): DeviceAuthorization {
+export function parseDeviceCode(body: JsonObject): DeviceAuthorization {
   const interval = body.interval;
   const intervalSeconds = typeof interval === "number" && Number.isFinite(interval) && interval > 0
     ? interval
@@ -148,7 +146,15 @@ function parseDeviceCode(body: JsonObject): DeviceAuthorization {
   };
 }
 
-async function requestXaiDeviceCode(signal?: AbortSignal): Promise<DeviceAuthorization> {
+export function toDeviceCodeInfo(device: DeviceAuthorization): AiProviderOAuthDeviceCode {
+  return {
+    userCode: device.userCode,
+    verificationUri: device.verificationUri,
+    expiresInSeconds: device.expiresInSeconds,
+  };
+}
+
+export async function requestXaiDeviceCode(signal?: AbortSignal): Promise<DeviceAuthorization> {
   const response = await postForm(XAI_DEVICE_CODE_URL, {
     client_id: XAI_CLIENT_ID,
     scope: XAI_SCOPE,
@@ -173,7 +179,7 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-async function pollXaiDeviceTokens(
+export async function pollXaiDeviceTokens(
   device: DeviceAuthorization,
   signal?: AbortSignal,
 ): Promise<AiModelOAuthCredential> {
@@ -255,54 +261,5 @@ export async function refreshAiModelOAuthIfNeeded(
       return refreshXaiOAuth(credential, signal);
     default:
       throw new Error(`OAuth refresh is not supported for provider "${provider}".`);
-  }
-}
-
-@validateRpc()
-export class AiProviderOAuthAttemptImpl extends RpcTarget implements AiProviderOAuthAttempt {
-  #device: DeviceAuthorization;
-  #abort = new AbortController();
-  #waitPromise: Promise<AiModelOAuthCredential> | null = null;
-
-  constructor(device: DeviceAuthorization) {
-    super();
-    this.#device = device;
-  }
-
-  deviceInfo(): AiProviderOAuthDeviceCode {
-    return {
-      userCode: this.#device.userCode,
-      verificationUri: this.#device.verificationUri,
-      expiresInSeconds: this.#device.expiresInSeconds,
-    };
-  }
-
-  wait(): Promise<AiModelOAuthCredential> {
-    if (!this.#waitPromise) {
-      this.#waitPromise = pollXaiDeviceTokens(this.#device, this.#abort.signal);
-    }
-    return this.#waitPromise;
-  }
-
-  // Cap'n Web calls this when the client disposes the attempt stub.
-  [Symbol.dispose](): void {
-    this.#abort.abort();
-  }
-}
-
-/** Start a device-code OAuth login for a supported AI subscription provider. */
-export async function beginAiProviderOAuth(provider: AiOAuthProvider): Promise<{
-  device: AiProviderOAuthDeviceCode;
-  attempt: AiProviderOAuthAttemptImpl;
-}> {
-  switch (provider) {
-    case "xai": {
-      const device = await requestXaiDeviceCode();
-      const attempt = new AiProviderOAuthAttemptImpl(device);
-      return { device: attempt.deviceInfo(), attempt };
-    }
-    default:
-      provider satisfies never;
-      throw new Error(`Unsupported AI OAuth provider: ${provider}`);
   }
 }

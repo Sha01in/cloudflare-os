@@ -13,6 +13,7 @@ import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cl
 import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { XAI_MODELS } from "@earendil-works/pi-ai/providers/xai.models";
+import { refreshAiModelOAuthIfNeeded } from "./ai-provider-oauth.js";
 import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
@@ -732,7 +733,14 @@ export class LanguageModelGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<LanguageModelBinding> {
-    let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator, {
+    let config = this.ctx.props.config;
+    if (config.oauth) {
+      const oauth = await refreshAiModelOAuthIfNeeded(config.provider, config.oauth);
+      if (oauth !== config.oauth) {
+        config = { ...config, oauth, apiToken: "" };
+      }
+    }
+    let model = getModel(this.env, config, this.ctx.props.initiator, {
       metadata: this.ctx.props.metadata,
     });
     return new LanguageModelBindingImpl(model);
