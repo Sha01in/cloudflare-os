@@ -147,7 +147,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }> {
     const { device, attempt } = await this.user.beginAiProviderOAuth(provider);
     // Same shape as startGatekeeperLogin: wrap the DO-side target so the wire type is a
-    // Worker RpcTarget. wait()/addModel() still run on the user DO (tokens stay there).
+    // Worker RpcTarget. addModel() still runs on the user DO (tokens stay there).
     return { device, attempt: new AiProviderOAuthAttemptProxy(attempt) };
   }
   deleteModel(id: string): Promise<void> {
@@ -653,10 +653,6 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
 class AiProviderOAuthAttemptProxy extends RpcTarget implements AiProviderOAuthAttempt {
   constructor(private inner: AiProviderOAuthAttempt) {
     super();
-  }
-
-  wait(): Promise<void> {
-    return this.inner.wait();
   }
 
   addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {

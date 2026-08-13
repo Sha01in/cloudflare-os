@@ -308,10 +308,6 @@ class AiProviderOAuthAttemptImpl extends RpcTarget implements AiProviderOAuthAtt
     super();
   }
 
-  wait(): Promise<void> {
-    return this.user.waitAiProviderOAuth(this.attemptId);
-  }
-
   addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
     return this.user.addModelFromAiOAuth(this.attemptId, profile, config);
   }
@@ -604,6 +600,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (provider !== "xai") {
       throw new Error(`Unsupported AI OAuth provider: ${provider}`);
     }
+    this.#sweepExpiredPendingAiOAuth();
     const device = await requestXaiDeviceCode();
     const attemptId = crypto.randomUUID();
     this.#pendingAiOAuth.set(attemptId, {
@@ -616,6 +613,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       device: toDeviceCodeInfo(device),
       attempt: new AiProviderOAuthAttemptImpl(this, attemptId),
     };
+  }
+
+  #sweepExpiredPendingAiOAuth(): void {
+    const now = Date.now();
+    for (const row of this.storage.pendingAiOAuth.list()) {
+      if (now - row.createdAt >= row.device.expiresInSeconds * 1000) {
+        this.#pendingAiOAuth.delete(row.id);
+        this.storage.pendingAiOAuth.delete(row.id);
+      }
+    }
   }
 
   #loadPendingAiOAuth(attemptId: string): PendingAiOAuth | undefined {
@@ -664,13 +671,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error(
         `OAuth provider mismatch: signed in with "${pending.provider}", adding "${config.provider}".`);
     }
-    this.#pendingAiOAuth.delete(attemptId);
-    this.storage.pendingAiOAuth.delete(attemptId);
     profile.type = "agent";
     this.storage.aiModels.put({
       profile,
       config: { ...config, apiToken: "", oauth: pending.credential },
     });
+    this.#pendingAiOAuth.delete(attemptId);
+    this.storage.pendingAiOAuth.delete(attemptId);
   }
 
   cancelAiProviderOAuth(attemptId: string): void {
