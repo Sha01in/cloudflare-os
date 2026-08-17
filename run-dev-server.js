@@ -319,6 +319,10 @@ if (wranglerPort) {
       "VITE_BACKEND_HOST did not include a port, so run-dev-server.js could not derive " +
       "a Wrangler --port override.");
 }
+args.push("--ip", process.env.WRANGLER_DEV_IP || "0.0.0.0");
+if (process.env.WRANGLER_PERSIST) {
+  args.push("--persist-to", process.env.WRANGLER_PERSIST);
+}
 console.log(`\nStarting: wrangler dev ${args.join(" ")}\n`);
 
 try {
