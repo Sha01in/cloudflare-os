@@ -30,6 +30,24 @@ export function getWranglerPortFromBackendHost(backendHost: string): string | nu
 }
 
 /**
+ * Origin a gatekeeper should advertise as BASE_URL. `--port` forces backendHost to
+ * localhost, which would send OAuth callbacks to the user's laptop; when PUBLIC_BASE_URL
+ * is set (e.g. a k8s tryout ingress), prefer that.
+ */
+export function gatekeeperBaseUrl(
+  gatekeeperName: string,
+  backendHost: string,
+  publicBaseUrl?: string | null,
+): string {
+  const slug = gatekeeperName.startsWith("gatekeeper-")
+    ? gatekeeperName.slice("gatekeeper-".length)
+    : gatekeeperName;
+  const origin = (publicBaseUrl ?? "").trim().replace(/\/$/, "");
+  if (origin) return `${origin}/gatekeeper/${slug}`;
+  return `http://${backendHost}/gatekeeper/${slug}`;
+}
+
+/**
  * Resolve where the dev server's backend lives: an explicit `--port` wins, else
  * `VITE_BACKEND_HOST`, else `localhost:8787`.
  */
