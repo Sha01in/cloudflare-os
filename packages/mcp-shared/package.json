@@ -31,8 +31,7 @@
     "./util": "./src/util.ts"
   },
   "scripts": {
-    "build": "tsc",
-    "types:check": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "build": "tsc && tsc -p tsconfig.test.json",
     "clean": "rm -rf dist",
     "test": "vitest run"
   },
@@ -42,8 +41,8 @@
     "@modelcontextprotocol/client": "2.0.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260429.1",
-    "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "@types/node": "^26.1.0",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   }
 }

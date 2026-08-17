@@ -251,6 +251,22 @@ export interface ObserverConfigCallback extends RpcTarget {
   configure(needs: ObserverBindingNeed[]): Promise<ObserverAccountChoice[]>;
 }
 
+/** Builds the create/read helpers for a family of expected errors carrying stable
+ * machine-readable codes. The per-code messages double as the classification fallback for errors
+ * from older deployments that lost the code in transit, so changing one is a compatibility break. */
+function codedErrorFamily<Code extends string>(messages: Record<Code, string>) {
+  const codes = new Set<unknown>(Object.keys(messages));
+  return {
+    create: (code: Code): Error & { code: Code } =>
+        Object.assign(new Error(messages[code]), { code }),
+    getCode: (error: unknown): Code | undefined => {
+      const candidate = typeof error === "object" && error !== null && "code" in error
+          ? error.code : undefined;
+      return codes.has(candidate) ? candidate as Code : undefined;
+    },
+  };
+}
+
 /** Stable error codes attached to expected failures from `AuthenticatedApi.openGadget()`. */
 export const OPEN_GADGET_ERROR_CODES = {
   workspaceNotFound: "WORKSPACE_NOT_FOUND",
@@ -261,29 +277,40 @@ export const OPEN_GADGET_ERROR_CODES = {
 export type OpenGadgetErrorCode =
     typeof OPEN_GADGET_ERROR_CODES[keyof typeof OPEN_GADGET_ERROR_CODES];
 
-const OPEN_GADGET_ERROR_MESSAGES: Record<OpenGadgetErrorCode, string> = {
+const openGadgetErrors = codedErrorFamily<OpenGadgetErrorCode>({
   [OPEN_GADGET_ERROR_CODES.workspaceNotFound]: "Workspace not found.",
   [OPEN_GADGET_ERROR_CODES.workspaceAccessDenied]: "You don't have access to this workspace.",
-};
+});
 
 /** Creates an expected `openGadget()` error with a machine-readable code. */
-export function createOpenGadgetError(
-    code: OpenGadgetErrorCode): Error & { code: OpenGadgetErrorCode } {
-  return Object.assign(new Error(OPEN_GADGET_ERROR_MESSAGES[code]), { code });
-}
+export const createOpenGadgetError = openGadgetErrors.create;
 
 /** Reads the machine-readable code from an expected `openGadget()` error. */
-export function getOpenGadgetErrorCode(error: unknown): OpenGadgetErrorCode | undefined {
-  if (typeof error !== "object" || error === null) return undefined;
+export const getOpenGadgetErrorCode = openGadgetErrors.getCode;
 
-  const candidate = "code" in error ? error.code : undefined;
-  return isOpenGadgetErrorCode(candidate) ? candidate : undefined;
-}
+/** Stable error codes attached to authentication failures. */
+export const AUTH_ERROR_CODES = {
+  invalidSessionToken: "INVALID_SESSION_TOKEN",
+  notAuthenticatedWithAccess: "NOT_AUTHENTICATED_WITH_ACCESS",
+} as const;
 
-function isOpenGadgetErrorCode(value: unknown): value is OpenGadgetErrorCode {
-  return value === OPEN_GADGET_ERROR_CODES.workspaceNotFound ||
-      value === OPEN_GADGET_ERROR_CODES.workspaceAccessDenied;
-}
+/** An expected authentication failure code. */
+export type AuthErrorCode = typeof AUTH_ERROR_CODES[keyof typeof AUTH_ERROR_CODES];
+
+/** Messages for auth failures thrown without a surviving code; clients match these only as a
+ * classification fallback. */
+export const AUTH_ERROR_MESSAGES: Record<AuthErrorCode, string> = {
+  [AUTH_ERROR_CODES.invalidSessionToken]: "invalid session token",
+  [AUTH_ERROR_CODES.notAuthenticatedWithAccess]: "Not authenticated with Access.",
+};
+
+const authErrors = codedErrorFamily(AUTH_ERROR_MESSAGES);
+
+/** Creates an authentication failure with a machine-readable code. */
+export const createAuthError = authErrors.create;
+
+/** Reads the machine-readable code from an authentication failure. */
+export const getAuthErrorCode = authErrors.getCode;
 
 // Top-level API exposed to the user after they have authenticated.
 export interface AuthenticatedApi extends RpcTarget {
@@ -309,8 +336,18 @@ export interface AuthenticatedApi extends RpcTarget {
   listModels(): Promise<AiChatAuthorInfo[]>;
 
   // Adds a new model to the user's configured set. The ID must be unique among the user's
-  // configured models.
+  // configured models. Do not put subscription OAuth tokens in `config.oauth` — those are
+  // written only by a completed `AiProviderOAuthAttempt.addModel()`.
   addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void>;
+
+  // Begin a subscription OAuth login for an AI provider (device-code flow). Returns a device
+  // code the client shows/opens, plus an `attempt` stub. Call `attempt.addModel()` to wait
+  // for authorization and persist the model in one user-DO RPC. Credentials never leave that
+  // Durable Object. Dispose `attempt` to abandon.
+  beginAiProviderOAuth(provider: AiOAuthProvider): Promise<{
+    device: AiProviderOAuthDeviceCode;
+    attempt: AiProviderOAuthAttempt;
+  }>;
 
   // Deletes a configured model.
   deleteModel(id: string): Promise<void>;
@@ -917,7 +954,30 @@ export type CloudflareAccountOption = {
 };
 
 // Supported AI providers.
-export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama" | "xai";
+
+// Providers that can authenticate via a consumer subscription OAuth flow (no API key required).
+// Device-code login is used so the Workshop backend never hosts an OAuth callback server.
+export type AiOAuthProvider = "xai";
+
+// Reasoning effort for models that expose it (OpenAI Responses / xAI Grok 4.5, etc.).
+export type AiReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+// Metadata for one picker entry under a provider in `SUGGESTED_MODELS`.
+export type SuggestedModelInfo = {
+  // Human-readable label shown in the UI.
+  name: string;
+  // Maximum tokens one request may total (prompt + response).
+  contextWindow: number;
+  // When present, both the requested response cap and the space reserved for it in the window.
+  outputLimit?: number;
+  // Default reasoning effort when the model supports it. Used when the user picks the model from
+  // the suggested list without overriding effort.
+  reasoningEffort?: AiReasoningEffort;
+  // When true, the model is intended to be added via subscription OAuth (e.g. SuperGrok), not an
+  // API key. The add-model UI still allows an API-key fallback under advanced settings.
+  oauthPreferred?: boolean;
+};
 
 // Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`.
 export type AiGatewayInfo = {
@@ -927,6 +987,39 @@ export type AiGatewayInfo = {
   enabled: false;
 };
 
+// OAuth tokens for a subscription-backed AI provider. Stored on the user Durable Object with the
+// model config and refreshed server-side before chat turns when `expires` is near. Never returned
+// to the client and not accepted on `AuthenticatedApi.addModel()`.
+export type AiModelOAuthCredential = {
+  // Short-lived access token used as the provider bearer credential.
+  access: string;
+  // Long-lived refresh token used to mint new access tokens.
+  refresh: string;
+  // Epoch milliseconds after which `access` should be treated as expired (already skewed early).
+  expires: number;
+};
+
+// Device-code challenge shown to the user while they authorize a subscription AI provider.
+export type AiProviderOAuthDeviceCode = {
+  // Short code the user confirms on the provider's verification page.
+  userCode: string;
+  // HTTPS URL the client opens (may include the user code as a query param when the provider
+  // returns `verification_uri_complete`).
+  verificationUri: string;
+  // Seconds until the device code expires.
+  expiresInSeconds: number;
+};
+
+// A pending subscription OAuth attempt started by `AuthenticatedApi.beginAiProviderOAuth()`.
+// Holding this stub is the capability to finish sign-in and persist the model; dispose it to
+// abandon. Tokens never appear on this interface.
+export interface AiProviderOAuthAttempt extends RpcTarget {
+  // Persist a model using this attempt's credentials. Waits for authorization if needed,
+  // then writes the model on the user Durable Object in the same RPC. `config.oauth` must
+  // be omitted — tokens are attached server-side. The attempt is consumed and cannot be reused.
+  addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void>;
+}
+
 // Configuration specifying how to connect to an AI model provider.
 export type AiModelConfig = {
   // Which AI provider hosts the model?
@@ -935,8 +1028,17 @@ export type AiModelConfig = {
   // Name of the specific model, as specified to the provider's API.
   model: string;
 
-  // Secret API token for the respective provider, for billing purposes.
+  // Secret API token for the respective provider, for billing purposes. Empty string when the
+  // model authenticates via `oauth` instead.
   apiToken: string;
+
+  // Subscription OAuth credentials (e.g. SuperGrok / X Premium). Server-side only: written by
+  // `AiProviderOAuthAttempt.addModel()` and read by inference. Clients must omit this field.
+  oauth?: AiModelOAuthCredential;
+
+  // Preferred reasoning effort for models that support it. Defaults to provider/handle defaults
+  // when omitted (currently medium for OpenAI Responses-style APIs).
+  reasoningEffort?: AiReasoningEffort;
 
   // Cloudflare account ID owning the Workers AI deployment the token authorizes. Required for
   // provider "cloudflare" (whose REST endpoint is account-scoped); unused for other providers.
@@ -957,7 +1059,7 @@ export const WORKERS_AI_OUTPUT_LIMIT = 32768;
 // leaving the remainder as the prompt budget context compaction sizes against.
 export const SUGGESTED_MODELS: Record<
   AiModelProvider,
-  Record<string, {name: string, contextWindow: number, outputLimit?: number}>
+  Record<string, SuggestedModelInfo>
 > = {
   "cloudflare": {
     "@cf/moonshotai/kimi-k2.7-code": {
@@ -982,6 +1084,28 @@ export const SUGGESTED_MODELS: Record<
   },
   "google": {
     "gemini-3.6-flash": {name: "Gemini 3.6 Flash", contextWindow: 1048576},
+  },
+  "xai": {
+    // Subscription (SuperGrok / SuperGrok Heavy / X Premium+) is the normal path; API keys work too.
+    "grok-4.5": {
+      name: "Grok 4.5 (SuperGrok)",
+      contextWindow: 500000,
+      outputLimit: 128000,
+      reasoningEffort: "high",
+      oauthPreferred: true,
+    },
+    "grok-4.3": {
+      name: "Grok 4.3 (SuperGrok)",
+      contextWindow: 1000000,
+      outputLimit: 30000,
+      oauthPreferred: true,
+    },
+    "grok-build-0.1": {
+      name: "Grok Build 0.1 (SuperGrok)",
+      contextWindow: 256000,
+      outputLimit: 128000,
+      oauthPreferred: true,
+    },
   },
   "ollama": {
   },

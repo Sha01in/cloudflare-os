@@ -12,6 +12,10 @@
       "types": "./src/observability-context.ts",
       "import": "./src/observability-context.ts"
     },
+    "./tracing": {
+      "types": "./src/tracing.ts",
+      "import": "./src/tracing.ts"
+    },
     "./error-reporting": {
       "types": "./src/error-reporting.ts",
       "import": "./src/error-reporting.ts"
@@ -19,7 +23,6 @@
   },
   "scripts": {
     "build": "tsc",
-    "types:check": "tsc --noEmit && tsc -p tsconfig.type-tests.json",
     "clean": "rm -rf dist",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -28,8 +31,8 @@
     "@gadgets/error-reporting": "workspace:*"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.16.20",
-    "@cloudflare/workers-types": "^4.20260702.1",
-    "vitest": "^4.1.10"
+    "@cloudflare/vitest-pool-workers": "catalog:",
+    "@cloudflare/workers-types": "^5.20260722.1",
+    "vitest": "catalog:"
   }
 }

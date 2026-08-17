@@ -12,7 +12,9 @@ import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.mode
 import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
 import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
-import { ApprovalQueue, Gatekeeper, ResourceDescription } from '@gadgets/workshop-shared/gatekeeper';
+import { XAI_MODELS } from "@earendil-works/pi-ai/providers/xai.models";
+import { refreshAiModelOAuthIfNeeded } from "./ai-provider-oauth.js";
+import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
 import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT }
@@ -123,6 +125,7 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
     case "openai": return (OPENAI_MODELS as Record<string, Model<Api>>)[modelId];
     case "google": return (GOOGLE_MODELS as Record<string, Model<Api>>)[modelId];
     case "cloudflare": return (CLOUDFLARE_WORKERS_AI_MODELS as Record<string, Model<Api>>)[modelId];
+    case "xai": return (XAI_MODELS as Record<string, Model<Api>>)[modelId];
     case "ollama": return undefined;
     default: return undefined;
   }
@@ -231,6 +234,23 @@ function gatewayNativeModel(config: AiModelConfig, gatewayUrl: string): Model<Ap
         ...window,
         compat: workersAiCompat(catalog),
       };
+    case "xai":
+      // AI Gateway's grok passthrough speaks xAI's OpenAI-compatible surface. Prefer the
+      // Responses API when the catalog marks the model that way (grok-4.5); otherwise
+      // completions.
+      return {
+        id: config.model,
+        name: catalog?.name ?? config.model,
+        api: catalog?.api === "openai-responses" ? "openai-responses" : "openai-completions",
+        provider: "xai",
+        baseUrl: `${gatewayUrl}/grok`,
+        reasoning: catalog?.reasoning ?? true,
+        input: catalog?.input ?? ["text", "image"],
+        cost: catalog?.cost ?? ZERO_COST,
+        ...window,
+        thinkingLevelMap: catalog?.thinkingLevelMap,
+        compat: catalog?.compat,
+      };
     default:
       return undefined;
   }
@@ -258,6 +278,8 @@ type HandleArgs = {
   gatewayMetadata?: GatewayMetadata;
   sessionAffinity?: string;
   aiGatewayLogRoute?: AiGatewayLogRoute;
+  // Override the default reasoning effort for OpenAI Responses-style APIs.
+  reasoningEffort?: AiModelConfig["reasoningEffort"];
 };
 
 function makeHandle(args: HandleArgs): ModelHandle {
@@ -272,16 +294,18 @@ function makeHandle(args: HandleArgs): ModelHandle {
   //   Anthropic models (e.g. Haiku 4.5, which rejects the adaptive format) we pass nothing, so pi
   //   omits the `thinking` field and the provider default (no extended thinking) applies --
   //   matching the pre-pi quick-model behavior.
-  // - OpenAI Responses: explicit medium reasoning effort. pi would otherwise *disable* reasoning
-  //   when no effort is passed; effort selection also makes pi request encrypted reasoning
-  //   content, which -- with pi's unconditional `store: false` -- preserves the old stateless
-  //   ZDR behavior with reasoning carried between tool steps.
+  // - OpenAI Responses: explicit reasoning effort. pi would otherwise *disable* reasoning when no
+  //   effort is passed; effort selection also makes pi request encrypted reasoning content, which
+  //   -- with pi's unconditional `store: false` -- preserves the old stateless ZDR behavior with
+  //   reasoning carried between tool steps. Default medium; configs (e.g. Grok 4.5 SuperGrok) may
+  //   request high.
   // - Everything else: provider defaults.
   const anthropicCompat = args.model.compat as AnthropicMessagesCompat | undefined;
+  const responsesEffort = args.reasoningEffort ?? "medium";
   const apiExtras: Record<string, unknown> =
       args.model.api === "anthropic-messages"
           ? (anthropicCompat?.forceAdaptiveThinking === true ? { thinkingEnabled: true } : {}) :
-      args.model.api === "openai-responses" ? { reasoningEffort: "medium" } : {};
+      args.model.api === "openai-responses" ? { reasoningEffort: responsesEffort } : {};
 
   const handle: ModelHandle = {
     model: args.model,
@@ -342,6 +366,12 @@ function makeHandle(args: HandleArgs): ModelHandle {
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
                          options: ModelRoutingOptions = {}): ModelHandle {
+  // Subscription OAuth (SuperGrok, etc.) always hits the provider directly with the user's
+  // access token — never AI Gateway provider keys or BYOK unified billing.
+  if (config.oauth) {
+    return getModelDirect(config, options.sessionAffinity);
+  }
+
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
   // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
@@ -359,6 +389,17 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig,
   }
 
   return getModelDirect(config, options.sessionAffinity);
+}
+
+// Bearer credential for a model: OAuth access token wins over a static API key.
+function resolveApiCredential(config: AiModelConfig): string {
+  return config.oauth?.access || config.apiToken;
+}
+
+// Prefer an explicit config override, then the suggested-model default (e.g. Grok 4.5 -> high).
+function resolveReasoningEffort(config: AiModelConfig): AiModelConfig["reasoningEffort"] {
+  return config.reasoningEffort
+      ?? SUGGESTED_MODELS[config.provider]?.[config.model]?.reasoningEffort;
 }
 
 // Route inference through the user's own account (unified billing) via their account's default AI
@@ -393,6 +434,7 @@ function getModelViaUserGateway(
     },
     gatewayMetadata: metadata,
     sessionAffinity,
+    reasoningEffort: resolveReasoningEffort(config),
     aiGatewayLogRoute: {
       gateway: "default",
       accountId: userGateway.accountId,
@@ -444,6 +486,7 @@ function getModelViaGateway(
       model,
       apiKey: gwConfig.apiToken,
       sessionAffinity: options.sessionAffinity,
+      reasoningEffort: resolveReasoningEffort(config),
     });
   }
 
@@ -471,6 +514,7 @@ function getModelViaGateway(
     headers: gatewayAuthHeaders,
     gatewayMetadata: metadata,
     sessionAffinity: options.sessionAffinity,
+    reasoningEffort: resolveReasoningEffort(config),
     aiGatewayLogRoute: logRoute(gateway),
   });
 }
@@ -479,6 +523,8 @@ function getModelViaGateway(
 function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelHandle {
   const catalog = catalogModel(config.provider, config.model);
   const window = modelTokenWindow(config, catalog);
+  const apiKey = resolveApiCredential(config);
+  const reasoningEffort = resolveReasoningEffort(config);
   switch (config.provider) {
     case "anthropic":
       return makeHandle({
@@ -496,14 +542,15 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
           // Catalog compat verbatim -- see the gateway-path comment on forceAdaptiveThinking.
           compat: catalog?.compat,
         },
-        apiKey: config.apiToken,
+        apiKey,
         sessionAffinity,
+        reasoningEffort,
       });
     case "cloudflare": {
       // Workers AI is fetch-only (no Workers-binding transport), so outside AI Gateway mode it's
       // BYOK like every other provider: the user's own account ID and API token come from the
       // model config. (The REST endpoint is account-scoped, hence the extra accountId field.)
-      if (!config.accountId || !config.apiToken) {
+      if (!config.accountId || !apiKey) {
         throw new Error(
             "This Workers AI model has no Cloudflare credentials. Re-add it with your " +
             "Cloudflare account ID and an API token that permits Workers AI.");
@@ -521,8 +568,9 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
           ...window,
           compat: workersAiCompat(catalog),
         },
-        apiKey: config.apiToken,
+        apiKey,
         sessionAffinity,
+        reasoningEffort,
       });
     }
     case "google":
@@ -539,8 +587,9 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
           ...window,
           thinkingLevelMap: catalog?.thinkingLevelMap,
         },
-        apiKey: config.apiToken,
+        apiKey,
         sessionAffinity,
+        reasoningEffort,
       });
     case "ollama":
       // `apiUrl` is the Ollama server base; its OpenAI-compat endpoint lives under /v1. Accept
@@ -557,17 +606,41 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
           name: config.model,
           api: "openai-completions",
           provider: "ollama",
-          baseUrl: `${(config.apiUrl ?? "http://localhost:11434")
-              .replace(/\/+$/, "").replace(/\/(api|v1)$/, "")}/v1`,
+          baseUrl: `${stripTrailingSlashes(config.apiUrl ?? "http://localhost:11434")
+              .replace(/\/(api|v1)$/, "")}/v1`,
           reasoning: true,
           input: ["text", "image"],
           cost: ZERO_COST,
+
+          // Pi's OpenAI compat uses the "developer" role for the system prompt by default,
+          // disabling it only for certain hostnames which are known not to support it.
+          //
+          // In ollama, some models support it and some do not. Frustratingly, the ones that do not
+          // don't necessarily throw an error. They may just proceed without a system prompt. For
+          // example, when I tested Muse Glimmer the day after it was released, I found it
+          // understood what tool calls were available to it but didn't know any of the info in
+          // the system prompt. Annoyingly, Muse Glimmer seems to be trained to treat the system
+          // prompt as secret, so refused to answer my questions about it directly. But I figured
+          // out it clearly wasn't getting the system prompt. And when I disabled  the "developer"
+          // role, the problem was fixed. In contrast, though, Gemma 4 running under otherwise
+          // exactly the same setup does understand the "developer" role and works fine. Weird!
+          //
+          // Some users also filed issues about this because they were trying to use the ollama
+          // provider as a way to target an arbitrary third-party OpenAI-compatible provider. This
+          // is not the intended use case for the ollama provider -- we should add an explicit
+          // provider for this. The ollama provider could in the future switch to using the ollama
+          // native API rather than the OpenAI-compatible endpoint, which would break users using
+          // it in this way. That said, if this flag works as a temporary work-around for them
+          // util we add a real OpenAI provider option... great.
+          compat: catalog?.compat ?? {supportsDeveloperRole: false},
+
           ...window,
         },
-        ...(config.apiToken === ""
-            ? { apiKey: "unused", headers: { Authorization: null } }
-            : { apiKey: config.apiToken }),
+        ...(apiKey === ""
+            ? { apiKey: "ollama", headers: { Authorization: null } }
+            : { apiKey }),
         sessionAffinity,
+        reasoningEffort,
       });
     case "openai":
       return makeHandle({
@@ -584,9 +657,37 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
           thinkingLevelMap: catalog?.thinkingLevelMap,
           compat: catalog?.compat,
         },
-        apiKey: config.apiToken,
+        apiKey,
         sessionAffinity,
+        reasoningEffort,
       });
+    case "xai": {
+      // SuperGrok OAuth and xAI API keys both authenticate as a bearer token against api.x.ai.
+      // grok-4.5 uses the Responses API; older catalog entries use Completions.
+      if (!apiKey) {
+        throw new Error(
+            "This xAI model has no credentials. Sign in with SuperGrok or add an xAI API key.");
+      }
+      const api = catalog?.api === "openai-responses" ? "openai-responses" : "openai-completions";
+      return makeHandle({
+        model: {
+          id: config.model,
+          name: catalog?.name ?? config.model,
+          api,
+          provider: "xai",
+          baseUrl: config.apiUrl ?? "https://api.x.ai/v1",
+          reasoning: catalog?.reasoning ?? true,
+          input: catalog?.input ?? ["text", "image"],
+          cost: catalog?.cost ?? ZERO_COST,
+          ...window,
+          thinkingLevelMap: catalog?.thinkingLevelMap,
+          compat: catalog?.compat,
+        },
+        apiKey,
+        sessionAffinity,
+        reasoningEffort,
+      });
+    }
     default:
       config.provider satisfies never;
       throw new Error(`Unknown provider "${config.provider}".`);
@@ -632,7 +733,14 @@ export class LanguageModelGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<LanguageModelBinding> {
-    let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator, {
+    let config = this.ctx.props.config;
+    if (config.oauth) {
+      const oauth = await refreshAiModelOAuthIfNeeded(config.provider, config.oauth);
+      if (oauth !== config.oauth) {
+        config = { ...config, oauth, apiToken: "" };
+      }
+    }
+    let model = getModel(this.env, config, this.ctx.props.initiator, {
       metadata: this.ctx.props.metadata,
     });
     return new LanguageModelBindingImpl(model);

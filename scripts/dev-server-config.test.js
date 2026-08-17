@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { getWranglerPortFromBackendHost } from "./dev-server-config.js";
+import {
+  gatekeeperBaseUrl,
+  getDevServerConfig,
+  getWranglerPortFromBackendHost,
+} from "./dev-server-config.js";
 
 describe("getWranglerPortFromBackendHost", () => {
   it("extracts a port from a localhost backend host", () => {
@@ -38,5 +42,57 @@ describe("getWranglerPortFromBackendHost", () => {
     assert.throws(
         () => getWranglerPortFromBackendHost("http://localhost:9000"),
         /VITE_BACKEND_HOST must include a valid host/);
+  });
+});
+
+describe("getDevServerConfig", () => {
+  it("uses VITE_BACKEND_HOST as the public host and Wrangler port", () => {
+    assert.deepEqual(getDevServerConfig([], "localhost:9000"), {
+      backendHost: "localhost:9000",
+      wranglerPort: "9000",
+    });
+  });
+
+  it("uses --port as the public host and Wrangler port", () => {
+    assert.deepEqual(getDevServerConfig(["--port", "8899"]), {
+      backendHost: "localhost:8899",
+      wranglerPort: "8899",
+    });
+  });
+
+  it("accepts --port=value", () => {
+    assert.deepEqual(getDevServerConfig(["--port=8899"]), {
+      backendHost: "localhost:8899",
+      wranglerPort: "8899",
+    });
+  });
+
+  for (const args of [["--port"], ["--port", "nope"], ["--port=0"], ["--port=65536"]]) {
+    it(`rejects invalid arguments: ${args.join(" ")}`, () => {
+      assert.throws(() => getDevServerConfig(args), /--port must be an integer between 1 and 65535/);
+    });
+  }
+});
+
+describe("gatekeeperBaseUrl", () => {
+  it("uses http://backendHost/gatekeeper/<slug> when PUBLIC_BASE_URL is unset", () => {
+    assert.equal(
+        gatekeeperBaseUrl("gatekeeper-github", "localhost:8787", undefined),
+        "http://localhost:8787/gatekeeper/github");
+  });
+
+  it("derives from PUBLIC_BASE_URL when set, even if backendHost is localhost", () => {
+    assert.equal(
+        gatekeeperBaseUrl(
+            "gatekeeper-google",
+            "localhost:8787",
+            "https://cloudflare-os-nonprod-k8s.internal.conduit.inc"),
+        "https://cloudflare-os-nonprod-k8s.internal.conduit.inc/gatekeeper/google");
+  });
+
+  it("strips a trailing slash on PUBLIC_BASE_URL", () => {
+    assert.equal(
+        gatekeeperBaseUrl("gatekeeper-slack", "localhost:8787", "https://example.internal/"),
+        "https://example.internal/gatekeeper/slack");
   });
 });

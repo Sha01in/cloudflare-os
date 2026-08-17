@@ -1,3 +1,4 @@
+import { logRpcFailure } from './rpcErrors'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Dialog, useKumoToastManager, type PortalContainer } from '@cloudflare/kumo'
 import {
@@ -10,15 +11,14 @@ import {
   Sparkle,
   X,
 } from '@phosphor-icons/react'
-import { RpcStub, RpcTarget } from 'capnweb'
+import { RpcStub } from 'capnweb'
 import {
   AgentSpawnerConfig,
   AiChatAuthorInfo,
-  ConnectedAccountsSubscriber,
   GatekeeperClient,
   Overseer,
 } from '@gadgets/workshop-shared/api'
-import { AccountDescription, SupportedResource, VendorDescription, matchesResourceUrlPattern } from '@gadgets/workshop-shared/gatekeeper'
+import { SupportedResource, VendorDescription, matchesResourceUrlPattern } from '@gadgets/workshop-shared/gatekeeper'
 import { ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
@@ -34,6 +34,7 @@ import { AccountChooser, AccountOption } from './gatekeeper-modal/AccountChooser
 import { matchesResourceUrl } from './resourceMatching'
 import { reportIssue } from './errorReporting'
 import { useSiteName } from './ServerConfigContext'
+import { AccountsSubscriberAdapter } from './accountsSubscriber'
 
 export interface GatekeeperModalProps {
   open: boolean
@@ -215,7 +216,6 @@ export default function GatekeeperModal({
   const spawnerEnvCandidatesRef = useRef(spawnerEnvCandidates)
   spawnerEnvCandidatesRef.current = spawnerEnvCandidates
 
-  const accountSubscriptionRef = useRef<{ [Symbol.dispose](): void } | null>(null)
   const configuratorFrameRef = useRef<ConfiguratorFrameState | null>(null)
   const configuratorCollectResourceUrlRef = useRef<(() => Promise<string>) | null>(null)
   const nextConfiguratorFrameKeyRef = useRef(0)
@@ -407,46 +407,27 @@ export default function GatekeeperModal({
     let cancelled = false
     const accountMap = new Map<number, AccountOption>()
 
-    class AccountsSubscriber extends RpcTarget implements ConnectedAccountsSubscriber {
-      add(
-        id: number,
-        description: AccountDescription,
-        vendor: VendorDescription,
-        supportedResources: SupportedResource[] = [],
-        credentialsValid: boolean = true,
-        vendorId: string = '',
-      ) {
+    const subscriber = new AccountsSubscriberAdapter({
+      add({ id, description, vendor, supportedResources, credentialsValid, vendorId }) {
         if (cancelled) return
         accountMap.set(id, { id, description, vendorId, vendorDescription: vendor, supportedResources, credentialsValid })
         setAccounts(Array.from(accountMap.values()))
-      }
-
-      remove(id: number) {
+      },
+      remove(id) {
         if (cancelled) return
         accountMap.delete(id)
         setAccounts(Array.from(accountMap.values()))
-      }
-
-      ready() {}
-    }
-
-    const subscriber = new AccountsSubscriber()
-    authenticatedApi.subscribeConnectedAccounts(subscriber)
-      .then(stub => {
-        if (cancelled) {
-          stub[Symbol.dispose]()
-        } else {
-          accountSubscriptionRef.current = stub
-        }
-      })
-      .catch(error => {
-        console.error('Failed to subscribe to connected accounts:', error)
-      })
+      },
+    })
+    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
+    subscription.catch(error => {
+      if (cancelled) return
+      logRpcFailure('Failed to subscribe to connected accounts:', error)
+    })
 
     return () => {
       cancelled = true
-      accountSubscriptionRef.current?.[Symbol.dispose]()
-      accountSubscriptionRef.current = null
+      subscription[Symbol.dispose]()
     }
   }, [open, authenticatedApi])
 
