@@ -16,7 +16,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
-import { getDevServerConfig } from "./scripts/dev-server-config.js";
+import { getDevServerConfig, gatekeeperBaseUrl } from "./scripts/dev-server-config.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PACKAGES_DIR = join(ROOT, "packages");
@@ -210,7 +210,7 @@ for (const gk of gatekeepers) {
   const config = parse(readFileSync(srcPath, "utf8"));
   config.build = { ...config.build, cwd: gk.dir };
   config.vars = config.vars || {};
-  config.vars.BASE_URL = `http://${backendHost}/gatekeeper/${gk.name.slice("gatekeeper-".length)}`;
+  config.vars.BASE_URL = gatekeeperBaseUrl(gk.name, backendHost, process.env.PUBLIC_BASE_URL);
 
   const shared = SHARED_GATEKEEPER_CREDS[gk.name];
   if (shared && process.env[shared.id] && process.env[shared.secret]) {
@@ -325,11 +325,19 @@ if (process.env.WRANGLER_PERSIST) {
 }
 console.log(`\nStarting: wrangler dev ${args.join(" ")}\n`);
 
-try {
-  execFileSync("pnpm", ["exec", "wrangler", "dev", ...args],
-      { stdio: "inherit", cwd: ROOT });
-} catch (e) {
-  // wrangler was killed or exited with an error; the output was already shown
-  // via stdio: "inherit", so just propagate the exit code.
-  process.exit(e.status ?? 1);
-}
+const child = spawn("pnpm", ["exec", "wrangler", "dev", ...args], {
+  stdio: "inherit",
+  cwd: ROOT,
+});
+const shutdown = (signal) => {
+  if (!child.killed) child.kill(signal);
+};
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+child.on("error", (err) => {
+  console.error(err);
+  process.exit(1);
+});
+child.on("exit", (code, signal) => {
+  process.exit(code ?? (signal ? 1 : 0));
+});

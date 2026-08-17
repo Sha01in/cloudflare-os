@@ -25,6 +25,15 @@ export function getWranglerPortFromBackendHost(backendHost) {
   return url.port;
 }
 
+export function gatekeeperBaseUrl(gatekeeperName, backendHost, publicBaseUrl) {
+  const slug = gatekeeperName.startsWith("gatekeeper-")
+    ? gatekeeperName.slice("gatekeeper-".length)
+    : gatekeeperName;
+  const origin = (publicBaseUrl ?? "").trim().replace(/\/$/, "");
+  if (origin) return `${origin}/gatekeeper/${slug}`;
+  return `http://${backendHost}/gatekeeper/${slug}`;
+}
+
 export function getDevServerConfig(args, envBackendHost) {
   let commandLinePort = null;
 

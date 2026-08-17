@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  gatekeeperBaseUrl,
   getDevServerConfig,
   getWranglerPortFromBackendHost,
 } from "./dev-server-config.js";
@@ -71,4 +72,27 @@ describe("getDevServerConfig", () => {
       assert.throws(() => getDevServerConfig(args), /--port must be an integer between 1 and 65535/);
     });
   }
+});
+
+describe("gatekeeperBaseUrl", () => {
+  it("uses http://backendHost/gatekeeper/<slug> when PUBLIC_BASE_URL is unset", () => {
+    assert.equal(
+        gatekeeperBaseUrl("gatekeeper-github", "localhost:8787", undefined),
+        "http://localhost:8787/gatekeeper/github");
+  });
+
+  it("derives from PUBLIC_BASE_URL when set, even if backendHost is localhost", () => {
+    assert.equal(
+        gatekeeperBaseUrl(
+            "gatekeeper-google",
+            "localhost:8787",
+            "https://cloudflare-os-nonprod-k8s.internal.conduit.inc"),
+        "https://cloudflare-os-nonprod-k8s.internal.conduit.inc/gatekeeper/google");
+  });
+
+  it("strips a trailing slash on PUBLIC_BASE_URL", () => {
+    assert.equal(
+        gatekeeperBaseUrl("gatekeeper-slack", "localhost:8787", "https://example.internal/"),
+        "https://example.internal/gatekeeper/slack");
+  });
 });
