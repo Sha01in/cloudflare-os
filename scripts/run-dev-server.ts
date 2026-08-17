@@ -619,6 +619,13 @@ if (wranglerPort) {
       "VITE_BACKEND_HOST did not include a port, so run-dev-server.ts could not derive " +
       "a Wrangler --port override.");
 }
+// Bind on all interfaces by default so a container/pod can be reached from outside the
+// network namespace (local `wrangler dev` still works via 127.0.0.1). Override with
+// WRANGLER_DEV_IP=127.0.0.1 to restore the previous loopback-only listen.
+args.push("--ip", process.env.WRANGLER_DEV_IP || "0.0.0.0");
+if (process.env.WRANGLER_PERSIST) {
+  args.push("--persist-to", process.env.WRANGLER_PERSIST);
+}
 console.log(`\nStarting: wrangler dev ${args.join(" ")}\n`);
 
 // Reached directly for the same reason the generated custom builds are; falls back to `pnpm exec` if
