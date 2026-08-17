@@ -137,15 +137,23 @@ function stopDevWatchers() {
   for (const watcher of devWatchers) watcher.kill();
 }
 
+let wranglerChild = null;
+let shuttingDown = false;
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stopDevWatchers();
+  if (wranglerChild && !wranglerChild.killed) {
+    wranglerChild.kill(signal);
+    return;
+  }
+  process.exit(signal === "SIGINT" ? 130 : 143);
+}
+
 process.on("exit", stopDevWatchers);
-process.on("SIGINT", () => {
-  stopDevWatchers();
-  process.exit(130);
-});
-process.on("SIGTERM", () => {
-  stopDevWatchers();
-  process.exit(143);
-});
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 // Helper: "gatekeeper-github" -> "GATEKEEPER_GITHUB"
 function bindingName(gk) {
@@ -329,15 +337,12 @@ const child = spawn("pnpm", ["exec", "wrangler", "dev", ...args], {
   stdio: "inherit",
   cwd: ROOT,
 });
-const shutdown = (signal) => {
-  if (!child.killed) child.kill(signal);
-};
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+wranglerChild = child;
 child.on("error", (err) => {
   console.error(err);
   process.exit(1);
 });
 child.on("exit", (code, signal) => {
+  stopDevWatchers();
   process.exit(code ?? (signal ? 1 : 0));
 });
