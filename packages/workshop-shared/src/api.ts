@@ -1425,6 +1425,14 @@ const SUGGESTED_MODEL_CATALOG = {
   },
   "xai": {
     // Subscription (SuperGrok / SuperGrok Heavy / X Premium+) is the normal path; API keys work too.
+    // Model ids match pi's XAI_MODELS / api.x.ai (openai-responses).
+    "grok-4.6": {
+      name: "Grok 4.6 (SuperGrok)",
+      contextWindow: 500000,
+      outputLimit: 128000,
+      reasoningEffort: "high",
+      oauthPreferred: true,
+    },
     "grok-4.5": {
       name: "Grok 4.5 (SuperGrok)",
       contextWindow: 500000,

@@ -543,6 +543,27 @@ describe("getModel direct routing (no gateway)", () => {
     const body = JSON.parse(request.body) as { reasoning?: { effort?: string } };
     expect(body.reasoning?.effort).toBe("high");
   }, 15000);
+
+  it("routes Grok 4.6 SuperGrok OAuth like 4.5 (Responses + high effort default)", async () => {
+    const handle = getModel(env(), {
+      provider: "xai",
+      model: "grok-4.6",
+      apiToken: "",
+      oauth: {
+        access: "xai-access-token",
+        refresh: "xai-refresh-token",
+        expires: Date.now() + 60_000,
+      },
+    }, INITIATOR);
+
+    expect(handle.model.api).toBe("openai-responses");
+    expect(handle.model.baseUrl).toBe("https://api.x.ai/v1");
+
+    const request = await captureRequest(handle);
+    expect(request.headers.get("authorization")).toBe("Bearer xai-access-token");
+    const body = JSON.parse(request.body) as { reasoning?: { effort?: string } };
+    expect(body.reasoning?.effort).toBe("high");
+  }, 15000);
 });
 
 describe("PDF attachment bridging", () => {

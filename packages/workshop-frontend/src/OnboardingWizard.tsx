@@ -315,8 +315,10 @@ export default function OnboardingWizard({
 
   return (
     <>
-    {/* visual-viewport-fixed already insets by the safe areas, so plain padding suffices. */}
-    <div className="visual-viewport-fixed dotted-bg flex items-start justify-center overflow-y-auto bg-kumo-base p-4 sm:py-8">
+    {/* visual-viewport-fixed already insets by the safe areas, so plain padding suffices.
+        Fill the viewport (not my-auto + overflow-y-auto): the sliding step row's height is the
+        max of every step, which pushed the footer Next button below the fold on short screens. */}
+    <div className="visual-viewport-fixed dotted-bg flex flex-col items-center bg-kumo-base p-4 sm:py-6 overflow-hidden">
       {/* Soft radial glow at the top for depth */}
       <div
         className="absolute inset-x-0 top-0 h-[50vh] pointer-events-none"
@@ -327,13 +329,13 @@ export default function OnboardingWizard({
       />
 
       <div
-        className={`relative my-auto w-full max-w-lg transition-all duration-500 ease-out ${
+        className={`relative flex h-full min-h-0 w-full max-w-lg flex-col transition-all duration-500 ease-out ${
           mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'
         }`}
       >
         {/* Gadgets brand */}
         <div
-          className={`mb-6 flex items-center justify-center gap-2 transition-all duration-500 sm:mb-10 ${
+          className={`mb-4 flex shrink-0 items-center justify-center gap-2 transition-all duration-500 sm:mb-6 ${
             mounted ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-1'
           }`}
         >
@@ -346,7 +348,7 @@ export default function OnboardingWizard({
         </div>
 
         {/* Header */}
-        <div className="mb-6 text-center sm:mb-8">
+        <div className="mb-4 shrink-0 text-center sm:mb-6">
           <h1
             className={`text-3xl font-semibold text-kumo-default tracking-tight transition-all duration-500 delay-100 ${
               mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'
@@ -364,7 +366,7 @@ export default function OnboardingWizard({
         </div>
 
         {/* Step indicator */}
-        <div className="mb-6 flex items-center justify-center gap-2 sm:mb-8">
+        <div className="mb-4 flex shrink-0 items-center justify-center gap-2 sm:mb-6">
           {Array.from({ length: totalSteps }).map((_, i) => (
             <div
               key={i}
@@ -379,14 +381,15 @@ export default function OnboardingWizard({
           ))}
         </div>
 
-        {/* Step content — sliding panel */}
-        <div className="overflow-hidden rounded-2xl border border-kumo-line bg-kumo-elevated shadow-xl shadow-black/[0.04]">
+        {/* Step content — sliding panel; footer stays visible inside the viewport. */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-kumo-line bg-kumo-elevated shadow-xl shadow-black/[0.04]">
+          <div className="relative min-h-0 flex-1 overflow-hidden">
           <div
-            className="flex transition-transform duration-400 ease-[cubic-bezier(0.25,0.1,0.25,1)]"
+            className="flex h-full transition-transform duration-400 ease-[cubic-bezier(0.25,0.1,0.25,1)]"
             style={{ transform: `translateX(-${step * 100}%)` }}
           >
             {/* ── Step 0: Profile ───────────────────────────────────────────── */}
-            <div className="min-h-[320px] w-full flex-shrink-0 p-5 sm:min-h-[420px] sm:p-8">
+            <div className="h-full w-full flex-shrink-0 overflow-y-auto p-5 sm:p-8">
               <h2 className="text-lg font-medium text-kumo-default mb-1">
                 Create your profile
               </h2>
@@ -474,7 +477,7 @@ export default function OnboardingWizard({
             </div>
 
             {/* ── Step 1: Model selection ───────────────────────────────────── */}
-            <div className="min-h-[320px] w-full flex-shrink-0 p-5 sm:min-h-[420px] sm:p-8">
+            <div className="h-full w-full flex-shrink-0 overflow-y-auto p-5 sm:p-8">
               <div>
                 <h2 className="text-lg font-medium text-kumo-default mb-1">
                   Choose your model
@@ -558,7 +561,7 @@ export default function OnboardingWizard({
             </div>
 
             {/* ── Step 2: Connections ───────────────────────────────────────── */}
-            <div className={`min-h-[320px] w-full flex-shrink-0 p-5 sm:min-h-[420px] sm:p-8 ${showConnectionsStep ? '' : 'hidden'}`}>
+            <div className={`h-full w-full flex-shrink-0 overflow-y-auto p-5 sm:p-8 ${showConnectionsStep ? '' : 'hidden'}`}>
               <div>
                 <h2 className="text-lg font-medium text-kumo-default mb-1">
                   Connect your services
@@ -642,13 +645,14 @@ export default function OnboardingWizard({
             </div>
 
             {/* ── Final step: What you can do ────────────────────────────────── */}
-            <div className="min-h-[320px] w-full flex-shrink-0 p-5 sm:min-h-[420px] sm:p-8">
+            <div className="h-full w-full flex-shrink-0 overflow-y-auto p-5 sm:p-8">
               <ShowcaseStep active={step === showcaseStep} siteName={siteName} />
             </div>
           </div>
 
-          {/* Fixed footer — stays put across all steps */}
-          <div className="flex items-center justify-between gap-3 border-t border-kumo-line bg-kumo-elevated px-5 py-4 sm:px-8 sm:py-5">
+          </div>
+          {/* Footer — always visible; step bodies scroll above it. */}
+          <div className="flex shrink-0 items-center justify-between gap-3 border-t border-kumo-line bg-kumo-elevated px-5 py-4 sm:px-8 sm:py-5">
             {/* Back button (hidden on first step) */}
             {step > 0 ? (
               <button

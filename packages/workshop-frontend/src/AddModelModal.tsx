@@ -423,7 +423,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             </>
           )}
 
-          {/* Reasoning effort (Grok 4.5 / OpenAI Responses) */}
+          {/* Reasoning effort (Grok / OpenAI Responses) */}
           {showEffort && selection && (
             <Select
               label="Reasoning effort"
@@ -434,7 +434,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
               disabled={oauthBusy}
               description={
                 isXai
-                  ? 'SuperGrok Heavy can sustain high effort. Grok 4.5 defaults to high.'
+                  ? 'SuperGrok Heavy can sustain high effort. Grok 4.6 / 4.5 default to high.'
                   : 'How hard the model thinks before answering.'
               }
               renderValue={(v) => EFFORT_OPTIONS.find(o => o.value === v)?.label ?? String(v)}
