@@ -47,8 +47,11 @@ export function positiveNumber(body: JsonObject, field: string): number {
   return value;
 }
 
-// The verification URI is opened in the user's browser; force https://auth.x.ai so a
-// malicious token response cannot launch something else.
+// The verification URI is opened in the user's browser; allow only known xAI auth
+// hosts so a malicious token response cannot launch something else. xAI moved from
+// auth.x.ai to accounts.x.ai (observed 2026-09-20); keep both.
+const TRUSTED_XAI_VERIFICATION_HOSTS = new Set(["auth.x.ai", "accounts.x.ai"]);
+
 export function validateVerificationUri(raw: string): string {
   let url: URL;
   try {
@@ -56,7 +59,7 @@ export function validateVerificationUri(raw: string): string {
   } catch {
     throw new Error("Untrusted verification URI in xAI OAuth response");
   }
-  if (url.protocol !== "https:" || url.hostname !== "auth.x.ai") {
+  if (url.protocol !== "https:" || !TRUSTED_XAI_VERIFICATION_HOSTS.has(url.hostname)) {
     throw new Error("Untrusted verification URI in xAI OAuth response");
   }
   return url.href;

@@ -22,9 +22,11 @@ describe("xAI OAuth helpers", () => {
       .toThrow("Untrusted verification URI");
   });
 
-  it("accepts https verification URIs on auth.x.ai", () => {
+  it("accepts https verification URIs on auth.x.ai and accounts.x.ai", () => {
     expect(validateVerificationUri("https://auth.x.ai/device?user_code=ABCD"))
       .toBe("https://auth.x.ai/device?user_code=ABCD");
+    expect(validateVerificationUri("https://accounts.x.ai/oauth2/device?user_code=ABCD"))
+      .toBe("https://accounts.x.ai/oauth2/device?user_code=ABCD");
   });
 
   it("rejects https URIs that are not auth.x.ai", () => {
@@ -36,12 +38,12 @@ describe("xAI OAuth helpers", () => {
     const device = parseDeviceCode({
       device_code: "dev-1",
       user_code: "WDJB-MJHT",
-      verification_uri: "https://auth.x.ai/device",
-      verification_uri_complete: "https://auth.x.ai/device?user_code=WDJB-MJHT",
+      verification_uri: "https://accounts.x.ai/oauth2/device",
+      verification_uri_complete: "https://accounts.x.ai/oauth2/device?user_code=WDJB-MJHT",
       expires_in: 600,
       interval: 5,
     });
-    expect(device.verificationUri).toBe("https://auth.x.ai/device?user_code=WDJB-MJHT");
+    expect(device.verificationUri).toBe("https://accounts.x.ai/oauth2/device?user_code=WDJB-MJHT");
     expect(device.userCode).toBe("WDJB-MJHT");
     expect(device.intervalSeconds).toBe(5);
   });
@@ -50,7 +52,7 @@ describe("xAI OAuth helpers", () => {
     expect(() => parseDeviceCode({
       device_code: "dev-1",
       user_code: "WDJB-MJHT",
-      verification_uri: "https://auth.x.ai/device",
+      verification_uri: "https://accounts.x.ai/oauth2/device",
       verification_uri_complete: "http://evil.example/phish",
       expires_in: 600,
     })).toThrow("Untrusted verification URI");
