@@ -4,6 +4,7 @@ set -eu
 
 image="${1:-cloudflareos-mvp:local}"
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+docker run --rm -i --entrypoint node "$image" < "$repo_dir/deploy/k8s/verify-https.mjs"
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/cloudflareos-smoke.XXXXXX")
 run_id="cloudflareos-smoke-$(date +%s)-$$"
 container="$run_id"
