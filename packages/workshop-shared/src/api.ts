@@ -1255,14 +1255,20 @@ export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" |
 export type AiOAuthProvider = "xai";
 
 /** Reasoning effort for models that expose it (OpenAI Responses / xAI Grok 4.5, etc.). */
-export type AiReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type AiReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/** Selectable efforts by provider and exact model ID, from the server's model catalog. */
+export type AiReasoningCapabilities = Partial<Record<AiModelProvider, Record<string, AiReasoningEffort[]>>>;
 
 /** Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`. */
-export type AiGatewayInfo = {
+export type AiGatewayInfo = ({
   enabled: true;
   enabledProviders: AiModelProvider[];
 } | {
   enabled: false;
+}) & {
+  /** Optional for compatibility with older servers. Unknown models use their default settings. */
+  reasoningEfforts?: AiReasoningCapabilities;
 };
 
 /**

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
-import { getModel, type ModelHandle } from "../src/ai-models.js";
+import { getAiReasoningCapabilities, getModel, type ModelHandle } from "../src/ai-models.js";
 
 // These tests exercise the real pi-ai stack: no module mocks. Routing decisions are asserted on
 // the returned handle's model descriptor (baseUrl/id/api) and log route, and request-level
@@ -45,6 +45,27 @@ function env(overrides: Partial<Cloudflare.Env> = {}): Cloudflare.Env {
 type CapturedRequest = { url: string; headers: Headers; body: string };
 
 const capturedRequests: CapturedRequest[] = [];
+
+describe("model-specific reasoning capabilities", () => {
+  it("uses the inference catalog's distinct Grok and OpenAI levels", () => {
+    const capabilities = getAiReasoningCapabilities();
+    expect(capabilities.xai?.["grok-4.6"]).toEqual(["low", "medium", "high", "xhigh"]);
+    expect(capabilities.xai?.["grok-4.5"]).toEqual(["low", "medium", "high"]);
+    expect(capabilities.xai?.["grok-build-0.1"]).toEqual(["low", "medium", "high"]);
+    expect(capabilities.openai?.["gpt-5.6-sol"]).toEqual(["none", "low", "medium", "high", "xhigh", "max"]);
+    expect(capabilities.openai?.["gpt-4o"]).toEqual([]);
+    expect(capabilities.xai?.["unknown-model"]).toBeUndefined();
+    // Don't offer controls which our other adapters don't yet forward.
+    expect(capabilities.anthropic).toBeUndefined();
+    expect(capabilities.google).toBeUndefined();
+  });
+
+  it("rejects unsupported effort instead of silently downgrading it", () => {
+    expect(() => getModel(env({ CF_AI_GATEWAY: undefined }), {
+      provider: "xai", model: "grok-4.5", apiToken: "test-key", reasoningEffort: "xhigh",
+    }, INITIATOR)).toThrow('Reasoning effort "xhigh" is not supported by grok-4.5');
+  });
+});
 
 const fetchStub = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const request = new Request(input as RequestInfo, init);
@@ -563,6 +584,29 @@ describe("getModel direct routing (no gateway)", () => {
     expect(request.headers.get("authorization")).toBe("Bearer xai-access-token");
     const body = JSON.parse(request.body) as { reasoning?: { effort?: string } };
     expect(body.reasoning?.effort).toBe("high");
+  }, 15000);
+
+  it.each(["oauth", "api-key", "gateway"] as const)("sends Grok 4.6 xhigh unchanged via %s", async mode => {
+    const handle = getModel(env({
+      CF_AI_GATEWAY: mode === "api-key" ? undefined : "platform-gateway",
+      CF_AI_GATEWAY_PROVIDERS: "xai",
+    }), {
+      provider: "xai", model: "grok-4.6", apiToken: mode === "oauth" ? "" : "test-key",
+      ...(mode === "oauth" ? {
+        oauth: { access: "test-access", refresh: "test-refresh", expires: Date.now() + 60_000 },
+      } : {}),
+      reasoningEffort: "xhigh",
+    }, INITIATOR);
+    const request = await captureRequest(handle);
+    expect(JSON.parse(request.body).reasoning.effort).toBe("xhigh");
+  }, 15000);
+
+  it("sends none only for a model whose catalog permits disabling reasoning", async () => {
+    const handle = getModel(env({ CF_AI_GATEWAY: undefined }), {
+      provider: "openai", model: "gpt-5.6-sol", apiToken: "test-key", reasoningEffort: "none",
+    }, INITIATOR);
+    const request = await captureRequest(handle);
+    expect(JSON.parse(request.body).reasoning.effort).toBe("none");
   }, 15000);
 });
 

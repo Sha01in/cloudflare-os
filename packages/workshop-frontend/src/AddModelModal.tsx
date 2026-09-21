@@ -45,11 +45,10 @@ const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
 
 const OAUTH_PROVIDERS = new Set<AiModelProvider>(['xai'])
 
-const EFFORT_OPTIONS: { value: AiReasoningEffort; label: string }[] = [
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-]
+const EFFORT_LABELS: Record<AiReasoningEffort, string> = {
+  none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High',
+  xhigh: 'Extra high (xhigh)', max: 'Maximum (max)',
+}
 
 // Example used in the custom-model placeholders for providers that have no suggested models
 // (currently Ollama, which serves whatever the user has pulled locally).
@@ -138,6 +137,12 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const [accountId, setAccountId] = useState('')
   const [apiUrl, setApiUrl] = useState('')
   const [reasoningEffort, setReasoningEffort] = useState<AiReasoningEffort | undefined>(undefined)
+  const modelEfforts = selection
+    ? aiConfig?.reasoningEfforts?.[selection.provider]?.[modelId.trim()]
+    : undefined
+  const effortOptions = Array.isArray(modelEfforts) ? modelEfforts : []
+  const selectedEffort = reasoningEffort && effortOptions.includes(reasoningEffort)
+    ? reasoningEffort : undefined
 
   // OAuth / subscription sign-in
   const [useApiKeyFallback, setUseApiKeyFallback] = useState(false)
@@ -267,7 +272,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       provider: selection!.provider,
       model: finalModelId,
       apiToken: gatewayMode ? '' : (opts?.apiToken ?? apiToken).trim(),
-      ...(reasoningEffort ? { reasoningEffort } : {}),
+      ...(selectedEffort ? { reasoningEffort: selectedEffort } : {}),
       ...(!gatewayMode && accountId.trim() && { accountId: accountId.trim() }),
       ...(!gatewayMode && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
     }
@@ -344,7 +349,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const isCloudflare = selection?.provider === 'cloudflare'
   const isXai = selection?.provider === 'xai'
   const showCredentials = !gatewayMode && selection && (!wantsOAuth || useApiKeyFallback)
-  const showEffort = isXai || selection?.provider === 'openai'
+  const showEffort = effortOptions.length > 0
 
   // Group options by provider for rendering with visual separators.
   const groupedOptions: { provider: string; items: typeof options }[] = []
@@ -404,7 +409,11 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
                 placeholder={`e.g., ${example!.modelId}`}
                 description={`The model identifier as specified by the provider (e.g., '${example!.modelId}')`}
                 value={modelId}
-                onChange={(e) => { setModelId(e.target.value); setErrors(prev => ({ ...prev, modelId: '' })) }}
+                onChange={(e) => {
+                  setModelId(e.target.value)
+                  setReasoningEffort(undefined)
+                  setErrors(prev => ({ ...prev, modelId: '' }))
+                }}
                 error={errors.modelId}
                 variant={errors.modelId ? 'error' : 'default'}
                 disabled={oauthBusy}
@@ -423,25 +432,22 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             </>
           )}
 
-          {/* Reasoning effort (Grok / OpenAI Responses) */}
+          {/* Only expose efforts supported by this exact model and our inference adapter. */}
           {showEffort && selection && (
             <Select
               label="Reasoning effort"
               className="w-full text-sm"
               placeholder="Default"
-              value={reasoningEffort}
-              onValueChange={(v) => setReasoningEffort(v as AiReasoningEffort)}
+              value={selectedEffort ?? 'default'}
+              onValueChange={(v) => setReasoningEffort(v === 'default' ? undefined : v as AiReasoningEffort)}
               disabled={oauthBusy}
-              description={
-                isXai
-                  ? 'SuperGrok Heavy can sustain high effort. Grok 4.6 / 4.5 default to high.'
-                  : 'How hard the model thinks before answering.'
-              }
-              renderValue={(v) => EFFORT_OPTIONS.find(o => o.value === v)?.label ?? String(v)}
+              description="How much the model thinks before answering. Higher effort can take longer."
+              renderValue={(v) => v === 'default' ? 'Default' : EFFORT_LABELS[v as AiReasoningEffort]}
             >
-              {EFFORT_OPTIONS.map(opt => (
-                <Select.Option key={opt.value} value={opt.value}>
-                  {opt.label}
+              <Select.Option value="default">Default</Select.Option>
+              {effortOptions.map(opt => (
+                <Select.Option key={opt} value={opt}>
+                  {EFFORT_LABELS[opt]}
                 </Select.Option>
               ))}
             </Select>
