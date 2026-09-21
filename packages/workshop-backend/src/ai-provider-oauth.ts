@@ -10,7 +10,7 @@ import type {
   AiProviderOAuthDeviceCode,
 } from "@gadgets/workshop-shared/api";
 
-// Public client id used by pi/Hermes-style SuperGrok device-code login. Not a secret.
+/** Public client id used by pi/Hermes-style SuperGrok device-code login. Not a secret. */
 export const XAI_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
 const XAI_SCOPE = "openid profile email offline_access grok-cli:access api:access";
 const XAI_DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code";
