@@ -15,7 +15,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
 import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
-import { LanguageModelGatekeeper } from "./ai-models";
+import { getAiReasoningCapabilities, LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
 import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
@@ -241,13 +241,15 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   getAiConfig(): Promise<AiGatewayInfo> {
     let gwConfig = getAiGatewayConfig(this.env);
+    const reasoningEfforts = getAiReasoningCapabilities();
     if (gwConfig) {
       return Promise.resolve({
         enabled: true,
         enabledProviders: [...gwConfig.providers] as AiModelProvider[],
+        reasoningEfforts,
       });
     } else {
-      return Promise.resolve({ enabled: false });
+      return Promise.resolve({ enabled: false, reasoningEfforts });
     }
   }
 

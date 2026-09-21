@@ -17,7 +17,8 @@ import { refreshAiModelOAuthIfNeeded } from "./ai-provider-oauth.js";
 import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
-import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT }
+import { AiChatAuthorInfo, AiModelConfig, AiReasoningCapabilities, AiReasoningEffort,
+  SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT }
   from "@gadgets/workshop-shared/api";
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
@@ -139,6 +140,25 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
     case "ollama": return undefined;
     default: return undefined;
   }
+}
+
+function selectableReasoningEfforts(model: Model<Api>): AiReasoningEffort[] {
+  // These are the adapters for which makeHandle forwards configurable effort today.
+  if (model.api !== "openai-responses" || !model.reasoning) return [];
+  const levels: AiReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+  // Match pi's catalog semantics: null disables a level; xhigh/max require explicit support.
+  // Its generic "off" level is named "none" on the Responses wire protocol.
+  return levels.filter(level => {
+    const mapped = model.thinkingLevelMap?.[level === "none" ? "off" : level];
+    return mapped !== null && (!(level === "xhigh" || level === "max") || mapped !== undefined);
+  });
+}
+
+/** Public, credential-free capability metadata from the same catalog used for inference. */
+export function getAiReasoningCapabilities(): AiReasoningCapabilities {
+  return Object.fromEntries(Object.entries({ openai: OPENAI_MODELS, xai: XAI_MODELS })
+    .map(([provider, models]) => [provider, Object.fromEntries(Object.values(models)
+      .map(model => [model.id, selectableReasoningEfforts(model)]))]));
 }
 
 // Token limits for a synthesized model. SUGGESTED_MODELS remains authoritative (compaction
@@ -412,6 +432,11 @@ function resolveApiCredential(config: AiModelConfig): string {
 
 // Prefer an explicit config override, then the suggested-model default (e.g. Grok 4.5 -> high).
 function resolveReasoningEffort(config: AiModelConfig): AiModelConfig["reasoningEffort"] {
+  const catalog = catalogModel(config.provider, config.model);
+  if (config.reasoningEffort && catalog?.api === "openai-responses"
+      && !selectableReasoningEfforts(catalog).includes(config.reasoningEffort)) {
+    throw new Error(`Reasoning effort "${config.reasoningEffort}" is not supported by ${config.model}.`);
+  }
   return config.reasoningEffort
       ?? SUGGESTED_MODELS[config.provider]?.[config.model]?.reasoningEffort;
 }
