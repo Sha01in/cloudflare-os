@@ -21,7 +21,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
-import { getDevServerConfig } from "./dev-server-config.ts";
+import { gatekeeperBaseUrl, getDevServerConfig } from "./dev-server-config.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
@@ -498,7 +498,7 @@ for (const gk of gatekeepers) {
   const config = parse(readFileSync(srcPath, "utf8"));
   config.build = devBuildConfig(config.build, gk.dir);
   config.vars = config.vars || {};
-  config.vars.BASE_URL = `http://${backendHost}/gatekeeper/${gk.name.slice("gatekeeper-".length)}`;
+  config.vars.BASE_URL = gatekeeperBaseUrl(gk.name, backendHost, process.env.PUBLIC_BASE_URL);
 
   const shared = SHARED_GATEKEEPER_CREDS[gk.name];
   if (shared && process.env[shared.id] && process.env[shared.secret]) {
@@ -618,6 +618,13 @@ if (wranglerPort) {
   console.warn(
       "VITE_BACKEND_HOST did not include a port, so run-dev-server.ts could not derive " +
       "a Wrangler --port override.");
+}
+// Bind on all interfaces by default so a container/pod can be reached from outside the
+// network namespace (local `wrangler dev` still works via 127.0.0.1). Override with
+// WRANGLER_DEV_IP=127.0.0.1 to restore the previous loopback-only listen.
+args.push("--ip", process.env.WRANGLER_DEV_IP || "0.0.0.0");
+if (process.env.WRANGLER_PERSIST) {
+  args.push("--persist-to", process.env.WRANGLER_PERSIST);
 }
 console.log(`\nStarting: wrangler dev ${args.join(" ")}\n`);
 

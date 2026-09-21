@@ -1,0 +1,16 @@
+.git
+.hermes
+.wrangler
+.dev.vars
+.dev.vars.*
+**/.dev.vars
+node_modules
+**/node_modules
+dist
+**/dist
+.run-local-stamp
+.DS_Store
+*.tsbuildinfo
+.github
+plans
+docs

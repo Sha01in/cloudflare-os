@@ -24,6 +24,14 @@ async function route(env: Env, path: string): Promise<string> {
 }
 
 describe('router fetch', () => {
+  it('answers GET /healthz with 200 and does not treat it as a frontend asset', async () => {
+    const env = makeEnv({ ASSETS: stubFetcher('assets') });
+    const req = new Request('https://example.com/healthz');
+    const res = await router.fetch!(req, env, {} as ExecutionContext);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+  });
+
   it('routes /api and /blueprint-screenshot prefixes to the backend', async () => {
     const env = makeEnv({ ASSETS: stubFetcher('assets') });
     expect(await route(env, '/api')).toBe('backend');

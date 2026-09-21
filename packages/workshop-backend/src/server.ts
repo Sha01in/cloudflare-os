@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, AiProviderOAuthAttempt, AiProviderOAuthDeviceCode, AiOAuthProvider } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -160,6 +160,22 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
   addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
     return this.#user.addModel(profile, config);
+  }
+  beginAiProviderOAuth(provider: AiOAuthProvider): Promise<{
+    device: AiProviderOAuthDeviceCode;
+    attempt: AiProviderOAuthAttempt;
+  }> {
+    return this.#beginAiProviderOAuth(provider);
+  }
+
+  async #beginAiProviderOAuth(provider: AiOAuthProvider): Promise<{
+    device: AiProviderOAuthDeviceCode;
+    attempt: AiProviderOAuthAttempt;
+  }> {
+    const { device, attempt } = await this.#user.beginAiProviderOAuth(provider);
+    // Same shape as startGatekeeperLogin: wrap the DO-side target so the wire type is a
+    // Worker RpcTarget. addModel() still runs on the user DO (tokens stay there).
+    return { device, attempt: new AiProviderOAuthAttemptProxy(attempt) };
   }
   deleteModel(id: string): Promise<void> {
     return this.#user.deleteModel(id);
@@ -660,6 +676,24 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
 
   async receive(): Promise<string | null> {
     return await this.pending.receive();
+  }
+}
+
+// Forwards SuperGrok device-code wait/addModel to the user DO attempt. Tokens never enter this
+// Worker; disposing cancels the DO-side poll.
+@validateRpc()
+class AiProviderOAuthAttemptProxy extends RpcTarget implements AiProviderOAuthAttempt {
+  constructor(private inner: AiProviderOAuthAttempt) {
+    super();
+  }
+
+  addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
+    return this.inner.addModel(profile, config);
+  }
+
+  [Symbol.dispose](): void {
+    const disposable = this.inner as AiProviderOAuthAttempt & { [Symbol.dispose]?: () => void };
+    disposable[Symbol.dispose]?.();
   }
 }
 

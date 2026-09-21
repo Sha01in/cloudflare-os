@@ -25,6 +25,13 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
 
+    if (url.pathname === "/healthz") {
+      return new Response("ok", {
+        status: 200,
+        headers: { "cache-control": "no-store" },
+      });
+    }
+
     for (const key of Object.keys(env)) {
       if (!key.startsWith("GATEKEEPER_")) continue;
       const suffix = key.slice("GATEKEEPER_".length).toLowerCase().replaceAll("_", "-");
