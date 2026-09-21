@@ -128,6 +128,13 @@ const API_STREAMS: Record<string, StreamFunction<Api, SimpleStreamOptions>> = {
 
 const ZERO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
+// pi 0.84.4 predates Grok 4.7. Its API, limits, pricing, and effort levels match 4.6:
+// https://docs.x.ai/developers/grok-4-7. Remove this overlay when pi includes the model.
+const XAI_CATALOG = {
+  ...XAI_MODELS,
+  "grok-4.7": { ...XAI_MODELS["grok-4.6"], id: "grok-4.7", name: "Grok 4.7" },
+};
+
 // Consult pi's builtin catalog for cost/compat metadata of a known model id. Unknown models are
 // fine (synthesized with zero cost). Import per-provider, not providers/all.
 function catalogModel(provider: AiModelConfig["provider"], modelId: string): Model<Api> | undefined {
@@ -136,7 +143,7 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
     case "openai": return (OPENAI_MODELS as Record<string, Model<Api>>)[modelId];
     case "google": return (GOOGLE_MODELS as Record<string, Model<Api>>)[modelId];
     case "cloudflare": return (CLOUDFLARE_WORKERS_AI_MODELS as Record<string, Model<Api>>)[modelId];
-    case "xai": return (XAI_MODELS as Record<string, Model<Api>>)[modelId];
+    case "xai": return (XAI_CATALOG as Record<string, Model<Api>>)[modelId];
     case "ollama": return undefined;
     default: return undefined;
   }
@@ -156,7 +163,7 @@ function selectableReasoningEfforts(model: Model<Api>): AiReasoningEffort[] {
 
 /** Public, credential-free capability metadata from the same catalog used for inference. */
 export function getAiReasoningCapabilities(): AiReasoningCapabilities {
-  return Object.fromEntries(Object.entries({ openai: OPENAI_MODELS, xai: XAI_MODELS })
+  return Object.fromEntries(Object.entries({ openai: OPENAI_MODELS, xai: XAI_CATALOG })
     .map(([provider, models]) => [provider, Object.fromEntries(Object.values(models)
       .map(model => [model.id, selectableReasoningEfforts(model)]))]));
 }
