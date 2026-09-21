@@ -16,9 +16,17 @@ deploy/k8s/smoke-test.sh cloudflareos-mvp:local
 # Kubernetes target artifact; this does not publish or deploy it:
 docker build --platform linux/amd64 -f deploy/k8s/Dockerfile \
   -t cloudflareos-mvp:amd64 .
+docker run --rm -i --entrypoint node cloudflareos-mvp:amd64 < deploy/k8s/verify-https.mjs
 ```
 
-The smoke test creates disposable loopback-only containers and volumes. It saves
+The smoke test first checks that native workerd can validate Google's TLS
+certificate, fetch public OAuth discovery, and reach the token endpoint (an empty
+POST must return HTTP 400), using the final image's system CA bundle.
+This requires outbound HTTPS but no credentials; testing Node's own fetch
+alone would miss a broken native trust store. Run the same probe on the Kubernetes
+target image before publishing it.
+
+The smoke test then creates disposable loopback-only containers and volumes. It saves
 two users, a profile/avatar, workspace metadata, human chat, gadget code, a gadget
 counter, and a callback persisted in Durable Object storage. It checks cross-user
 access denial, kills the container, verifies recovery, stops it, copies the entire

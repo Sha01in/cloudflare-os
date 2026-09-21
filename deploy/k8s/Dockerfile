@@ -28,6 +28,10 @@ RUN pnpm add --ignore-scripts workerd@1.20260831.1 \
  && chmod 755 /runtime-bin/workerd
 
 FROM ${NODE_IMAGE} AS runtime
+# Native workerd uses the OS trust store for OAuth and provider HTTPS requests.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production \
     WORKERD_BIN=/usr/local/bin/workerd \
     WORKERD_STATE_DIR=/data/workerd
