@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
-# Tryout image: wrangler dev / pnpm run-local. Not production workerd.
-FROM node:22-bookworm-slim
+# Build all application artifacts before the container starts. The final image contains the
+# pinned native runtime and prebuilt assets, without a development server or dependency tree.
+ARG NODE_IMAGE=node:22-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS build
 
 RUN corepack enable && corepack prepare pnpm@11.17.0 --activate
 
@@ -10,14 +12,36 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json vite.config.t
 COPY wrangler.jsonc ./
 COPY packages ./packages
 COPY scripts ./scripts
-COPY test-setup ./test-setup
-COPY deploy/k8s/entrypoint.sh /entrypoint.sh
+RUN pnpm install --frozen-lockfile
+COPY workerd ./workerd
 
-RUN chmod +x /entrypoint.sh \
- && pnpm install --frozen-lockfile \
- && pnpm --filter @gadgets/typed-storage build \
- && pnpm --filter @gadgets/workshop-frontend build
+RUN pnpm workerd:build
 
-# Root on purpose: the data PVC is typically root-owned; this is a VPN tryout, not a hardened prod image.
+# JS/assets are portable; obtain the runtime binary for the target platform separately.
+# This avoids running the TypeScript native compiler under cross-architecture emulation.
+FROM ${NODE_IMAGE} AS runtime-binary
+RUN corepack enable && corepack prepare pnpm@11.17.0 --activate
+WORKDIR /binary
+RUN pnpm add --ignore-scripts workerd@1.20260831.1 \
+ && mkdir /runtime-bin \
+ && node -e 'require("node:fs").copyFileSync(require("workerd").default, "/runtime-bin/workerd")' \
+ && chmod 755 /runtime-bin/workerd
+
+FROM ${NODE_IMAGE} AS runtime
+ENV NODE_ENV=production \
+    WORKERD_BIN=/usr/local/bin/workerd \
+    WORKERD_STATE_DIR=/data/workerd
+
+WORKDIR /app
+COPY --from=runtime-binary /runtime-bin/workerd /usr/local/bin/workerd
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/workerd ./workerd
+COPY --from=build /app/scripts/workerd ./scripts/workerd
+COPY --from=build /app/packages/workshop-frontend/dist ./packages/workshop-frontend/dist
+COPY --chmod=755 deploy/k8s/entrypoint.sh /entrypoint.sh
+
+RUN mkdir -p /data/workerd && chown node:node /data/workerd
+USER node
 EXPOSE 8787
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["/entrypoint.sh"]

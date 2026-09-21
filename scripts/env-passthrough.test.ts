@@ -95,8 +95,10 @@ const EXPECTED: Record<string, ExpectedArea> = {
       "PREVIEW_WORKERS_DEV_HOST", "PREVIEW_WRANGLER", "VITE_BACKEND_HOST",
       // Read by `vp/concurrency.ts` in the wrapper before `vp` starts, never inside a task.
       "VP_RUN_CONCURRENCY_LIMIT",
-      // The local launcher reads these directly, outside cached vp tasks.
-      "PUBLIC_BASE_URL", "WRANGLER_DEV_IP", "WRANGLER_PERSIST",
+      // `workerd/serve.ts` launches the server directly, outside cached vp tasks.
+      "ADMINS", "AUTH_GATEKEEPERS", "DISABLE_PASSWORD_AUTH", "HOST", "LISTEN_ADDR",
+      "NODE_ENV", "PORT", "PUBLIC_BASE_URL", "WORKERD_BIN", "WORKERD_STATE_DIR",
+      "WRANGLER_DEV_IP", "WRANGLER_PERSIST",
     ],
   },
 };
