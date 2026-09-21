@@ -363,7 +363,7 @@ class AiProviderOAuthAttemptImpl extends RpcTarget implements AiProviderOAuthAtt
   }
 }
 
-// Durable Object that stores information about a user.
+/** Durable Object that stores information about a user. */
 export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
   private vendors: Map<string, Service<GatekeeperVendor>>;
