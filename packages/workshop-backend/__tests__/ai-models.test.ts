@@ -49,6 +49,7 @@ const capturedRequests: CapturedRequest[] = [];
 describe("model-specific reasoning capabilities", () => {
   it("uses the inference catalog's distinct Grok and OpenAI levels", () => {
     const capabilities = getAiReasoningCapabilities();
+    expect(capabilities.xai?.["grok-4.7"]).toEqual(["low", "medium", "high", "xhigh"]);
     expect(capabilities.xai?.["grok-4.6"]).toEqual(["low", "medium", "high", "xhigh"]);
     expect(capabilities.xai?.["grok-4.5"]).toEqual(["low", "medium", "high"]);
     expect(capabilities.xai?.["grok-build-0.1"]).toEqual(["low", "medium", "high"]);
@@ -565,10 +566,10 @@ describe("getModel direct routing (no gateway)", () => {
     expect(body.reasoning?.effort).toBe("high");
   }, 15000);
 
-  it("routes Grok 4.6 SuperGrok OAuth like 4.5 (Responses + high effort default)", async () => {
+  it.each(["grok-4.6", "grok-4.7"])("routes %s SuperGrok OAuth through Responses with high effort by default", async model => {
     const handle = getModel(env(), {
       provider: "xai",
-      model: "grok-4.6",
+      model,
       apiToken: "",
       oauth: {
         access: "xai-access-token",
@@ -577,28 +578,36 @@ describe("getModel direct routing (no gateway)", () => {
       },
     }, INITIATOR);
 
+    expect(handle.model.id).toBe(model);
+    expect(handle.model.contextWindow).toBe(500000);
+    expect(handle.model.maxTokens).toBe(128000);
     expect(handle.model.api).toBe("openai-responses");
     expect(handle.model.baseUrl).toBe("https://api.x.ai/v1");
 
     const request = await captureRequest(handle);
     expect(request.headers.get("authorization")).toBe("Bearer xai-access-token");
-    const body = JSON.parse(request.body) as { reasoning?: { effort?: string } };
+    const body = JSON.parse(request.body) as { model: string, reasoning?: { effort?: string } };
+    expect(body.model).toBe(model);
     expect(body.reasoning?.effort).toBe("high");
   }, 15000);
 
-  it.each(["oauth", "api-key", "gateway"] as const)("sends Grok 4.6 xhigh unchanged via %s", async mode => {
+  it.each(["grok-4.6", "grok-4.7"].flatMap(model =>
+    (["oauth", "api-key", "gateway"] as const).map(mode => ({ model, mode }))
+  ))("sends $model xhigh unchanged via $mode", async ({ model, mode }) => {
     const handle = getModel(env({
       CF_AI_GATEWAY: mode === "api-key" ? undefined : "platform-gateway",
       CF_AI_GATEWAY_PROVIDERS: "xai",
     }), {
-      provider: "xai", model: "grok-4.6", apiToken: mode === "oauth" ? "" : "test-key",
+      provider: "xai", model, apiToken: mode === "oauth" ? "" : "test-key",
       ...(mode === "oauth" ? {
         oauth: { access: "test-access", refresh: "test-refresh", expires: Date.now() + 60_000 },
       } : {}),
       reasoningEffort: "xhigh",
     }, INITIATOR);
     const request = await captureRequest(handle);
-    expect(JSON.parse(request.body).reasoning.effort).toBe("xhigh");
+    expect(handle.model.api).toBe("openai-responses");
+    expect(new URL(request.url).pathname).toMatch(/\/responses$/);
+    expect(JSON.parse(request.body)).toMatchObject({ model, reasoning: { effort: "xhigh" } });
   }, 15000);
 
   it("sends none only for a model whose catalog permits disabling reasoning", async () => {

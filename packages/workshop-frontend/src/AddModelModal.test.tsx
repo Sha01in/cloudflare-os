@@ -42,7 +42,7 @@ import AddModelModal from './AddModelModal'
 const aiConfig: AiGatewayInfo = {
   enabled: false,
   reasoningEfforts: {
-    xai: { 'grok-4.6': ['low', 'medium', 'high', 'xhigh'], 'grok-4.5': ['low', 'medium', 'high'] },
+    xai: { 'grok-4.7': ['low', 'medium', 'high', 'xhigh'], 'grok-4.6': ['low', 'medium', 'high', 'xhigh'], 'grok-4.5': ['low', 'medium', 'high'] },
     openai: { 'gpt-5.6-sol': ['none', 'low', 'medium', 'high', 'xhigh', 'max'] },
   },
 }
@@ -84,9 +84,9 @@ async function input(label: string, value: string) {
 }
 
 describe('model-specific effort selector', () => {
-  it('offers xhigh for Grok 4.6, removes it on 4.5, and includes OpenAI-only choices', async () => {
+  it.each(['grok-4.6', 'grok-4.7'])('offers xhigh for %s, removes it on 4.5, and includes OpenAI-only choices', async model => {
     await mount()
-    await choose('Select Model', 'xai:grok-4.6')
+    await choose('Select Model', `xai:${model}`)
     expect(efforts()).toEqual(['default', 'low', 'medium', 'high', 'xhigh'])
     await choose('Reasoning effort', 'xhigh')
     await choose('Select Model', 'xai:grok-4.5')
@@ -96,16 +96,16 @@ describe('model-specific effort selector', () => {
     expect(efforts()).toEqual(['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'])
   })
 
-  it('submits xhigh and lets users return to the model default', async () => {
+  it.each(['grok-4.6', 'grok-4.7'])('submits %s xhigh and lets users return to the model default', async model => {
     await mount()
-    await choose('Select Model', 'xai:grok-4.6')
+    await choose('Select Model', `xai:${model}`)
     await choose('Reasoning effort', 'xhigh')
     const fallback = Array.from(container.querySelectorAll('button')).find(b => b.textContent === 'Use an xAI API key instead')!
     await act(async () => fallback.click())
     await input('API Token', 'test-key')
     const submit = Array.from(container.querySelectorAll('button')).find(b => b.textContent === 'Add Model')!
     await act(async () => submit.click())
-    expect(addModel.mock.calls[0]?.[1]).toMatchObject({ model: 'grok-4.6', reasoningEffort: 'xhigh' })
+    expect(addModel.mock.calls[0]?.[1]).toMatchObject({ model, reasoningEffort: 'xhigh' })
     await choose('Reasoning effort', 'default')
     await act(async () => submit.click())
     expect(addModel.mock.calls[1]?.[1]).not.toHaveProperty('reasoningEffort')
